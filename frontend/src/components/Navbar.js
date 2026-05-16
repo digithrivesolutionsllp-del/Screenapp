@@ -8,26 +8,26 @@ import {
 const BRAND_BLUE = '#4175F5';
 
 const NAV_FEATURES = [
-  { label: 'AI Transcription', href: '/features' },
-  { label: 'Screen Recorder', href: '/features' },
-  { label: 'AI Summarizer', href: '/features' },
-  { label: 'Meeting Bot', href: '/features' },
-  { label: 'Audio Translator', href: '/features' },
-  { label: 'Video Analyzer', href: '/features' },
+  { label: 'AI Transcription', href: '/features/transcription' },
+  { label: 'Screen Recorder', href: '/features/screen-recorder' },
+  { label: 'AI Summarizer', href: '/features/ai-summarizer' },
+  { label: 'Meeting Bot', href: '/features/meeting-bot' },
+  { label: 'Audio Translator', href: '/features/audio-translator' },
+  { label: 'Video Analyzer', href: '/features/video-analyzer' },
 ];
 
 const NAV_DOWNLOAD = [
-  { label: 'Chrome Extension', href: '/chrome' },
-  { label: 'Desktop App (Mac)', href: '/desktop' },
-  { label: 'iOS App', href: '/mobile' },
-  { label: 'Android App', href: '/mobile' },
+  { label: 'Chrome Extension', href: '/app', state: { openExtension: true } },
+  { label: 'Desktop App (Mac)', href: '/features/screen-recorder' },
+  { label: 'iOS App', href: '/features/screen-recorder' },
+  { label: 'Android App', href: '/features/screen-recorder' },
 ];
 
 const NAV_EXPLORE = [
-  { label: 'Blog', href: '/blog' },
-  { label: 'Reviews', href: '/reviews' },
-  { label: 'Changelog', href: '/changelog' },
+  { label: 'All Features', href: '/features' },
+  { label: 'Pricing', href: '/pricing' },
   { label: 'Enterprise', href: '/pricing' },
+  { label: 'Reviews', href: '/pricing' },
 ];
 
 const NavDropdown = ({ label, items }) => {
@@ -41,7 +41,7 @@ const NavDropdown = ({ label, items }) => {
         {items.map(item => (
           <DropdownMenuItem
             key={item.label}
-            onClick={() => navigate(item.href)}
+            onClick={() => navigate(item.href, item.state ? { state: item.state } : undefined)}
             className="cursor-pointer text-sm py-2"
           >
             {item.label}

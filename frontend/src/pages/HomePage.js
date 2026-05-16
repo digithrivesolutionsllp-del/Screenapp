@@ -130,7 +130,8 @@ const HomePage = () => {
             <button onClick={() => navigate('/app')} className="flex items-center gap-2 text-base font-semibold text-white px-8 py-3.5 rounded-full hover:opacity-90 transition-opacity duration-150" style={{background: BRAND_BLUE}}>
               Start Free <ArrowRight className="w-5 h-5" />
             </button>
-            <button className="flex items-center gap-2.5 text-base font-semibold text-gray-800 bg-white border border-gray-200 px-8 py-3.5 rounded-full hover:bg-gray-50 transition-colors duration-150">
+            <button className="flex items-center gap-2.5 text-base font-semibold text-gray-800 bg-white border border-gray-200 px-8 py-3.5 rounded-full hover:bg-gray-50 transition-colors duration-150"
+              onClick={() => navigate('/app', { state: { openExtension: true } })}>
               <ChromeIcon /> Add to Chrome
             </button>
           </div>
