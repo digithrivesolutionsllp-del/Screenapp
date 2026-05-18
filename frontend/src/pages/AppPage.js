@@ -64,14 +64,20 @@ const ChromeExtModal = ({ onClose, onSave }) => {
     try {
       let stream;
       if (toggles.tabAudio) {
+        // Use selfBrowserSurface:'exclude' so ScreenApp tab is hidden from the
+        // sharing dialog, forcing the user to pick another tab (e.g. YouTube)
         const displayStream = await navigator.mediaDevices.getDisplayMedia({
           video: { displaySurface: 'browser' },
-          audio: true,
-          preferCurrentTab: true
+          audio: {
+            suppressLocalAudioPlayback: false, // keep YouTube audible while recording
+          },
+          selfBrowserSurface: 'exclude',   // hide THIS tab — user must pick another
+          preferCurrentTab: false,          // don't pre-select ScreenApp
+          surfaceSwitching: 'include',      // show all open tabs
         });
         if (displayStream.getAudioTracks().length === 0) {
           displayStream.getTracks().forEach(t => t.stop());
-          alert('No tab audio captured.\n\nWhen the sharing dialog appears:\n• Select the tab you want to capture\n• Check the "Share tab audio" checkbox\n• Then click Share');
+          alert('No tab audio detected.\n\nIn the Chrome sharing dialog you must:\n1. Click the "Chrome Tab" section\n2. Select the tab playing audio (e.g. YouTube)\n3. ✓ Check "Share tab audio"\n4. Click Share\n\nTry again and follow the steps above.');
           return;
         }
         displayStream.getVideoTracks().forEach(t => t.stop());
@@ -122,7 +128,7 @@ const ChromeExtModal = ({ onClose, onSave }) => {
           <div className="space-y-3 mb-5">
             {[
               { key: 'mic', label: 'Microphone', desc: 'Your microphone input' },
-              { key: 'tabAudio', label: 'Tab Audio', desc: 'Audio playing in this tab' },
+              { key: 'tabAudio', label: 'Tab Audio', desc: 'Capture another tab (YouTube etc.)' },
               { key: 'autoTranscribe', label: 'Auto-transcribe', desc: 'Transcribe after recording' }
             ].map(({ key, label, desc }) => (
               <div key={key} className="flex items-center justify-between">
@@ -142,8 +148,28 @@ const ChromeExtModal = ({ onClose, onSave }) => {
             <div className="flex items-center justify-center gap-2 mb-3 text-sm text-red-500 font-semibold">
               <div className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
               Recording {formatTime(recTime)}
+              {toggles.tabAudio && <span className="text-xs text-gray-400 font-normal ml-1">• Tab audio</span>}
             </div>
           )}
+
+          {/* Step-by-step guide for Tab Audio */}
+          {toggles.tabAudio && !isRec && (
+            <div className="bg-blue-50 border border-blue-100 rounded-xl p-3 mb-4">
+              <p className="text-xs font-bold text-blue-700 mb-2 flex items-center gap-1">
+                <span>📋</span> How to capture another tab's audio:
+              </p>
+              <ol className="space-y-1.5 text-xs text-blue-700">
+                <li className="flex gap-1.5"><span className="font-bold flex-shrink-0">1.</span> Open YouTube (or other tab) and start playing</li>
+                <li className="flex gap-1.5"><span className="font-bold flex-shrink-0">2.</span> Click <strong>"Start Recording"</strong> below</li>
+                <li className="flex gap-1.5"><span className="font-bold flex-shrink-0">3.</span> In Chrome dialog → click <strong>"Chrome Tab"</strong></li>
+                <li className="flex gap-1.5"><span className="font-bold flex-shrink-0">4.</span> Select the tab you want (e.g. YouTube)</li>
+                <li className="flex gap-1.5"><span className="font-bold flex-shrink-0">5.</span> ✓ Check <strong>"Share tab audio"</strong></li>
+                <li className="flex gap-1.5"><span className="font-bold flex-shrink-0">6.</span> Click <strong>Share</strong></li>
+              </ol>
+              <p className="text-xs text-blue-500 mt-2 italic">ScreenApp tab is hidden from the list automatically.</p>
+            </div>
+          )}
+
           {isRec ? (
             <button onClick={stopExtRec} className="w-full py-2.5 rounded-xl text-sm font-semibold text-white bg-red-500 hover:bg-red-600 flex items-center justify-center gap-2 transition-colors duration-150">
               <Square className="w-4 h-4 fill-white" /> Stop & Save
@@ -152,9 +178,6 @@ const ChromeExtModal = ({ onClose, onSave }) => {
             <button onClick={startExtRec} className="w-full py-2.5 rounded-xl text-sm font-semibold text-white flex items-center justify-center gap-2 hover:opacity-90 transition-opacity duration-150" style={{ background: BRAND_BLUE }}>
               <Mic className="w-4 h-4" /> Start Recording
             </button>
-          )}
-          {toggles.tabAudio && !isRec && (
-            <p className="text-xs text-gray-400 mt-2 text-center leading-relaxed">Will prompt for tab sharing. Check \"Share tab audio\" in the dialog.</p>
           )}
         </div>
       </div>
