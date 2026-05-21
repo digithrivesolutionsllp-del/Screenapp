@@ -15,6 +15,7 @@ class RecordingResponse(BaseModel):
     filename: str
     folder_id: Optional[str] = None
     duration: Optional[float] = None
+    size: Optional[int] = None
     created_at: datetime
     transcript: Optional[str] = None
     summary: Optional[str] = None

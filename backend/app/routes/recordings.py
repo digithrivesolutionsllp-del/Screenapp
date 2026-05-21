@@ -50,19 +50,21 @@ async def upload_recording(
         "filename": filename,
         "folder_id": None,
         "duration": None,
+        "size": len(content),
         "created_at": datetime.now(timezone.utc),
         "transcript": None,
         "summary": None,
     }
     result = await db.recordings.insert_one(doc)
     doc["_id"] = result.inserted_id
-    logger.info("Created recording %s: %s", doc["_id"], title)
+    logger.info("Created recording %s: %s (%.1f KB)", doc["_id"], title, len(content) / 1024)
     return {
         "id": str(doc["_id"]),
         "title": doc["title"],
         "filename": doc["filename"],
         "folder_id": None,
         "duration": None,
+        "size": len(content),
         "created_at": doc["created_at"].isoformat(),
         "transcript": None,
         "summary": None,
@@ -82,7 +84,7 @@ async def list_recordings(folder_id: str | None = None):
         query["folder_id"] = folder_id
     cursor = db.recordings.find(query, {
         "_id": 1, "title": 1, "filename": 1, "folder_id": 1,
-        "duration": 1, "created_at": 1, "transcript": 1, "summary": 1
+        "duration": 1, "size": 1, "created_at": 1, "transcript": 1, "summary": 1
     }).sort("created_at", -1)
     docs = await cursor.to_list(length=1000)
     return [RecordingResponse.from_mongo(d) for d in docs]
@@ -134,7 +136,12 @@ async def stream_audio(recording_id: str):
     if not filepath.exists():
         raise HTTPException(status_code=404, detail="Audio file not found")
     from starlette.responses import FileResponse
-    return FileResponse(filepath, media_type="audio/webm", filename=doc["filename"])
+    return FileResponse(
+        filepath,
+        media_type="audio/webm",
+        filename=doc["filename"],
+        headers={"Accept-Ranges": "bytes"},
+    )
 
 
 @router.delete("/{recording_id}")
