@@ -1,0 +1,22 @@
+{
+  "buildCommand": "yarn build",
+  "outputDirectory": "build",
+  "routes": [
+    {
+      "src": "/api/(.*)",
+      "dest": "https://YOUR_RAILWAY_BACKEND_URL/api/$1"
+    },
+    {
+      "src": "/(.*)",
+      "dest": "/$1"
+    }
+  ],
+  "headers": [
+    {
+      "source": "/(.*)",
+      "headers": [
+        { "key": "Cache-Control", "value": "no-cache" }
+      ]
+    }
+  ]
+}
