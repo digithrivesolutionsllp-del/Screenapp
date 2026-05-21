@@ -8,6 +8,7 @@ let audioChunks = [];
 let recordingTabs = [];
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  console.log('[BG] Message received:', msg.type, 'at', new Date().toISOString());
   if (msg.type === 'GET_TABS') {
     chrome.tabs.query({}).then(tabs => {
       const filtered = tabs.filter(t =>
@@ -62,6 +63,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   // Start recording selected tabs
   if (msg.type === 'START_RECORDING') {
+    console.log('[BG] START_RECORDING called for tabs:', msg.tabIds);
     startRecording(msg.tabIds, sendResponse);
     return true;
   }
@@ -145,6 +147,7 @@ const CAPTURE_SCRIPT = `
 `;
 
 async function startRecording(tabIds, sendResponse) {
+  console.log('[BG] startRecording() entered, tabIds:', tabIds);
   try {
     if (mediaRecorder && mediaRecorder.state === 'recording') {
       sendResponse({ success: false, error: 'Already recording' });
@@ -158,21 +161,22 @@ async function startRecording(tabIds, sendResponse) {
     let startedCount = 0;
     for (const tabId of tabIds) {
       try {
-        // Check if tab is capturable
         const tab = await chrome.tabs.get(tabId);
+        console.log('[BG] Tab', tabId, 'URL:', tab.url);
         if (!tab.url || tab.url.startsWith('chrome://') || tab.url.startsWith('about:')) {
+          console.log('[BG] Skipping tab', tabId, 'due to URL restriction');
           continue;
         }
 
-        await chrome.scripting.executeScript({
+        const result = await chrome.scripting.executeScript({
           target: { tabId: tabId },
           func: () => {
-            // Inject the capture script as a string
             const script = document.createElement('script');
             script.textContent = `
               (function() {
                 let recorder = null;
                 let stream = null;
+                console.log('[Content] Script injected, requesting mic...');
 
                 chrome.runtime.onMessage.addListener((msg) => {
                   if (msg.type === 'STOP_CAPTURE') {
@@ -198,26 +202,31 @@ async function startRecording(tabIds, sendResponse) {
                     recorder.start(200);
                     chrome.runtime.sendMessage({ type: 'CAPTURE_STARTED' });
                     recorder.onerror = e => chrome.runtime.sendMessage({ type: 'CAPTURE_ERROR', error: e.message });
+                    console.log('[Content] Recording started in tab');
                   })
-                  .catch(err => chrome.runtime.sendMessage({ type: 'CAPTURE_ERROR', error: err.message }));
+                  .catch(err => {
+                    console.error('[Content] getUserMedia failed:', err.message);
+                    chrome.runtime.sendMessage({ type: 'CAPTURE_ERROR', error: err.message || 'Permission denied or tab not capturable' });
+                  });
               })();
             `;
             (document.head || document.documentElement).appendChild(script);
             script.remove();
           }
         });
+        console.log('[BG] Script injected into tab', tabId, '— result:', result);
         startedCount++;
       } catch (e) {
-        console.warn('Tab', tabId, 'error:', e.message);
+        console.warn('[BG] Tab', tabId, 'injection error:', e.message);
       }
     }
 
+    console.log('[BG] startedCount:', startedCount);
     if (startedCount === 0) {
       sendResponse({ success: false, error: 'Could not capture any tabs. Make sure the tab has audio playing.' });
       return;
     }
 
-    // Start a lightweight background MediaRecorder to mark recording as active
     const emptyStream = new MediaStream();
     mediaRecorder = new MediaRecorder(emptyStream);
     mediaRecorder.ondataavailable = e => { if (e.data?.size > 0) audioChunks.push(e.data); };
@@ -226,6 +235,7 @@ async function startRecording(tabIds, sendResponse) {
     chrome.runtime.sendMessage({ type: 'RECORDING_STATE', state: 'recording', tabCount: startedCount });
     sendResponse({ success: true, tabCount: startedCount });
   } catch (err) {
+    console.error('[BG] startRecording error:', err.message);
     sendResponse({ success: false, error: err.message });
   }
 }

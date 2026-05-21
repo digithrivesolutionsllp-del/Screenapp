@@ -149,7 +149,6 @@ function startRecording() {
   isRecording = true;
   recordingStartTime = Date.now();
 
-  // Update UI immediately for feedback
   statusBadge.className = 'status-badge status-recording';
   statusBadge.textContent = 'Starting...';
   recordingBar.classList.add('active');
@@ -159,14 +158,26 @@ function startRecording() {
   btnStop.disabled = false;
   btnStop.textContent = '⏹ Stop';
 
+  // Add timeout so we don't hang if service worker is unresponsive
+  let timedOut = false;
+  const timeout = setTimeout(() => {
+    if (!isRecording) return;
+    timedOut = true;
+    showError('Service worker not responding. Reload extension from chrome://extensions and try again.');
+    resetUI();
+  }, 10000);
+
   chrome.runtime.sendMessage({
     type: 'START_RECORDING',
     tabIds: Array.from(selectedTabIds)
   }, (response) => {
+    clearTimeout(timeout);
+    if (timedOut) return;
     if (response && response.success) {
       startTimer();
     } else {
-      showError((response && response.error) || 'Could not start recording — service worker may be waking up, try again');
+      const err = (response && response.error) || 'Could not start recording — check the service worker console for errors.';
+      showError(err);
       resetUI();
     }
   });
