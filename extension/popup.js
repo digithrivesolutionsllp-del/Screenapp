@@ -83,7 +83,7 @@ function renderTabs() {
   tabList.innerHTML = tabs.map(tab => {
     const isSelected = selectedTabIds.has(tab.id);
     const favicon = tab.favIconUrl || '';
-    return '<div class="tab-item' + (isSelected ? ' selected' : '') + '" onclick="selectTab(' + tab.id + ')">' +
+    return '<div class="tab-item' + (isSelected ? ' selected' : '') + '" data-tab-id="' + tab.id + '">' +
       (isSelected ? '<div class="tab-check">&#10003;</div>' : '<div class="tab-empty-check"></div>') +
       '<img class="tab-favicon" src="' + favicon + '" onerror="this.style.display=\'none\'" />' +
       '<div class="tab-info">' +
@@ -123,9 +123,9 @@ function updateSelectedChips() {
     selectedChips.innerHTML = Array.from(selectedTabIds).map(id => {
       const tab = tabs.find(t => t.id === id);
       const name = tab ? tab.title.substring(0, 20) : 'Tab ' + id;
-      return '<div class="chip">' +
+      return '<div class="chip" data-chip-id="' + id + '">' +
         '<span class="chip-name">' + escapeHtml(name) + '</span>' +
-        '<span class="chip-remove" onclick="event.stopPropagation();removeTab(' + id + ')">&times;</span>' +
+        '<span class="chip-remove" data-remove-id="' + id + '">&times;</span>' +
       '</div>';
     }).join('');
   }
@@ -259,6 +259,25 @@ chrome.runtime.onMessage.addListener((msg) => {
   if (msg.type === 'RECORDING_ERROR') showError('Error: ' + (msg.error || 'unknown'));
   if (msg.type === 'UPLOAD_FAILED') showError('Upload failed: ' + (msg.error || ''));
 });
+
+// Delegated click handler — catches clicks on dynamically rendered tab items
+tabList.addEventListener('click', (e) => {
+  const item = e.target.closest('.tab-item');
+  if (!item || isRecording) return;
+  const tabId = parseInt(item.getAttribute('data-tab-id'), 10);
+  if (!isNaN(tabId)) selectTab(tabId);
+});
+
+// Delegated click for chip remove buttons
+selectedChips.addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-remove-id]');
+  if (!btn || isRecording) return;
+  const tabId = parseInt(btn.getAttribute('data-remove-id'), 10);
+  if (!isNaN(tabId)) removeTab(tabId);
+});
+
+// Delegated click for Clear button
+document.getElementById('btnCancel')?.addEventListener('click', clearSelection);
 
 // Start
 init();
