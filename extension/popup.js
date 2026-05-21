@@ -149,15 +149,24 @@ function startRecording() {
   isRecording = true;
   recordingStartTime = Date.now();
 
+  // Update UI immediately for feedback
+  statusBadge.className = 'status-badge status-recording';
+  statusBadge.textContent = 'Starting...';
+  recordingBar.classList.add('active');
+  recTabCount.textContent = selectedTabIds.size;
+  btnRecord.style.display = 'none';
+  btnStop.style.display = 'flex';
+  btnStop.disabled = false;
+  btnStop.textContent = '⏹ Stop';
+
   chrome.runtime.sendMessage({
     type: 'START_RECORDING',
     tabIds: Array.from(selectedTabIds)
   }, (response) => {
     if (response && response.success) {
-      updateRecordingUI('recording', response.tabCount || selectedTabIds.size);
       startTimer();
     } else {
-      showError((response && response.error) || 'Could not start recording');
+      showError((response && response.error) || 'Could not start recording — service worker may be waking up, try again');
       resetUI();
     }
   });
@@ -278,6 +287,10 @@ selectedChips.addEventListener('click', (e) => {
 
 // Delegated click for Clear button
 document.getElementById('btnCancel')?.addEventListener('click', clearSelection);
+
+// Delegated click for Record and Stop buttons
+document.getElementById('btnRecord')?.addEventListener('click', startRecording);
+document.getElementById('btnStop')?.addEventListener('click', stopRecording);
 
 // Start
 init();
