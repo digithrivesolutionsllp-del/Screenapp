@@ -133,9 +133,14 @@ function updateButtons() {
 // ─── Recording ────────────────────────────────────────────────────────────────
 
 async function startRecording() {
-  if (selectedTabIds.size === 0) return;
+  console.log('[Popup] startRecording() called');
+  if (selectedTabIds.size === 0) {
+    console.log('[Popup] No tabs selected');
+    return;
+  }
 
   const tabIds = Array.from(selectedTabIds);
+  console.log('[Popup] Tab IDs:', tabIds);
   btnRecord.disabled = true;
   btnCancel.disabled = true;
   isRecording = true;
@@ -353,8 +358,16 @@ selectedChips.addEventListener('click', (e) => {
 });
 
 btnCancel?.addEventListener('click', clearSelection);
-btnRecord?.addEventListener('click', startRecording);
-btnStop?.addEventListener('click', stopRecording);
+btnRecord?.addEventListener('click', () => {
+  console.log('[Popup] Record button clicked');
+  startRecording();
+});
+btnStop?.addEventListener('click', () => {
+  console.log('[Popup] Stop button clicked');
+  stopRecording();
+});
+
+console.log('[Popup] Script loaded. btnRecord:', !!btnRecord, 'btnStop:', !!btnStop);
 
 // ─── Start ──────────────────────────────────────────────────────────────────
 
