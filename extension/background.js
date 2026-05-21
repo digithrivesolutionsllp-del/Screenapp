@@ -77,7 +77,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   // Get current status
   if (msg.type === 'GET_STATUS') {
     sendResponse({
-      recording: mediaRecorder !== null,
+      recording: mediaRecorder !== null && mediaRecorder.state === 'recording',
       tabCount: recordingTabs.length,
       tabs: recordingTabs
     });
@@ -227,10 +227,10 @@ async function startRecording(tabIds, sendResponse) {
       return;
     }
 
-    const emptyStream = new MediaStream();
-    mediaRecorder = new MediaRecorder(emptyStream);
-    mediaRecorder.ondataavailable = e => { if (e.data?.size > 0) audioChunks.push(e.data); };
-    mediaRecorder.start(500);
+    // Track recording state in memory (no MediaRecorder in service worker)
+    recordingTabs = tabIds;
+    mediaRecorder = { state: 'recording' }; // marker object
+    audioChunks = [];
 
     chrome.runtime.sendMessage({ type: 'RECORDING_STATE', state: 'recording', tabCount: startedCount });
     sendResponse({ success: true, tabCount: startedCount });
@@ -241,15 +241,14 @@ async function startRecording(tabIds, sendResponse) {
 }
 
 async function stopRecording(sendResponse) {
-  if (!mediaRecorder) {
-    sendResponse({ success: false, error: 'Not recording' });
-    return;
-  }
-
+  console.log('[BG] stopRecording() entered');
   try {
-    const mr = mediaRecorder;
+    if (!mediaRecorder || mediaRecorder.state !== 'recording') {
+      sendResponse({ success: false, error: 'Not recording' });
+      return;
+    }
+
     mediaRecorder = null;
-    if (mr.state !== 'inactive') mr.stop();
 
     // Stop all content script recorders
     for (const tabId of recordingTabs) {
@@ -262,6 +261,7 @@ async function stopRecording(sendResponse) {
     const allBlobs = audioChunks;
     audioChunks = [];
 
+    console.log('[BG] Blobs collected:', allBlobs.length);
     if (allBlobs.length === 0) {
       recordingTabs = [];
       sendResponse({ success: false, error: 'No audio recorded' });
