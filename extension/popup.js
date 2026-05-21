@@ -1,10 +1,14 @@
-// ScreenApp Recorder - Popup UI Logic
+// ScreenApp Recorder - Popup UI v1.3
+// Handles tab capture and MediaRecorder directly (popup has full browser APIs)
 
 let tabs = [];
 let selectedTabIds = new Set();
 let isRecording = false;
 let recordingStartTime = null;
 let timerInterval = null;
+let tabStreams = [];      // MediaStream per captured tab
+let mediaRecorder = null;  // single combined recorder
+let audioChunks = [];      // ArrayBuffer chunks
 
 // Elements
 const statusBadge = document.getElementById('statusBadge');
@@ -20,23 +24,22 @@ const btnCancel = document.getElementById('btnCancel');
 const successPanel = document.getElementById('successPanel');
 const errorBanner = document.getElementById('errorBanner');
 
-// Load tabs immediately — with timeout so we never hang
+// ─── Init ────────────────────────────────────────────────────────────────────
+
 function init() {
   loadTabsWithTimeout();
-  checkStatus();
 }
 
 function loadTabsWithTimeout() {
   tabList.innerHTML = '<div class="loading"><div class="spinner"></div>Fetching tabs...</div>';
-
   const timeout = setTimeout(() => {
-    tabList.innerHTML = '<div style="padding:20px;color:#6b7280;font-size:12px;text-align:center">Tab list timed out.<br><span style="color:#94a3b8">Try reopening on a regular page.</span><br><button onclick="loadTabsWithTimeout()" style="margin-top:8px;padding:4px 12px;background:#1e293b;color:#94a3b8;border:none;border-radius:6px;cursor:pointer">Retry</button></div>';
+    tabList.innerHTML = '<div style="padding:20px;color:#6b7280;font-size:12px;text-align:center">Tab list timed out.<br><span style="color:#94a3b8">Try reopening on a regular page.</span><br><button onclick="window.loadTabsRetry && loadTabsWithTimeout()" style="margin-top:8px;padding:4px 12px;background:#1e293b;color:#94a3b8;border:none;border-radius:6px;cursor:pointer">Retry</button></div>';
   }, 5000);
 
   chrome.tabs.query({}, (allTabs) => {
     clearTimeout(timeout);
     if (chrome.runtime.lastError) {
-      tabList.innerHTML = '<div style="padding:20px;color:#6b7280;font-size:12px;text-align:center">Permission error.<br><span style="color:#94a3b8">' + chrome.runtime.lastError.message + '</span><br><button onclick="loadTabsWithTimeout()" style="margin-top:8px;padding:4px 12px;background:#1e293b;color:#94a3b8;border:none;border-radius:6px;cursor:pointer">Retry</button></div>';
+      tabList.innerHTML = '<div style="padding:20px;color:#6b7280;font-size:12px;text-align:center">Permission error.<br><span style="color:#94a3b8">' + chrome.runtime.lastError.message + '</span></div>';
       return;
     }
     tabs = allTabs.filter(t =>
@@ -45,8 +48,7 @@ function loadTabsWithTimeout() {
       !t.url.startsWith('chrome-extension://') &&
       !t.url.startsWith('devtools://') &&
       !t.url.startsWith('about:') &&
-      !t.url.startsWith('file://') &&
-      t.url !== ''
+      !t.url.startsWith('file://')
     ).map(t => ({
       id: t.id,
       title: (t.title || 'Untitled').substring(0, 60),
@@ -58,21 +60,7 @@ function loadTabsWithTimeout() {
   });
 }
 
-function loadTabs() {
-  loadTabsWithTimeout();
-}
-
-function checkStatus() {
-  chrome.runtime.sendMessage({ type: 'GET_STATUS' }, (response) => {
-    if (response && response.recording) {
-      isRecording = true;
-      selectedTabIds = new Set(response.tabs || []);
-      recordingStartTime = Date.now();
-      startTimer();
-      updateRecordingUI('recording', selectedTabIds.size);
-    }
-  });
-}
+// ─── Render ──────────────────────────────────────────────────────────────────
 
 function renderTabs() {
   if (tabs.length === 0) {
@@ -115,6 +103,13 @@ function removeTab(tabId) {
   updateButtons();
 }
 
+function clearSelection() {
+  if (isRecording) return;
+  selectedTabIds.clear();
+  renderTabs();
+  updateButtons();
+}
+
 function updateSelectedChips() {
   selectedCount.textContent = selectedTabIds.size;
   if (selectedTabIds.size === 0) {
@@ -123,7 +118,7 @@ function updateSelectedChips() {
     selectedChips.innerHTML = Array.from(selectedTabIds).map(id => {
       const tab = tabs.find(t => t.id === id);
       const name = tab ? tab.title.substring(0, 20) : 'Tab ' + id;
-      return '<div class="chip" data-chip-id="' + id + '">' +
+      return '<div class="chip">' +
         '<span class="chip-name">' + escapeHtml(name) + '</span>' +
         '<span class="chip-remove" data-remove-id="' + id + '">&times;</span>' +
       '</div>';
@@ -131,88 +126,158 @@ function updateSelectedChips() {
   }
 }
 
-function clearSelection() {
-  if (isRecording) return;
-  selectedTabIds.clear();
-  renderTabs();
-  updateButtons();
-}
-
 function updateButtons() {
   btnRecord.disabled = selectedTabIds.size === 0 || isRecording;
 }
 
-function startRecording() {
+// ─── Recording ────────────────────────────────────────────────────────────────
+
+async function startRecording() {
   if (selectedTabIds.size === 0) return;
+
+  const tabIds = Array.from(selectedTabIds);
   btnRecord.disabled = true;
   btnCancel.disabled = true;
   isRecording = true;
   recordingStartTime = Date.now();
+  audioChunks = [];
+  tabStreams = [];
 
+  // Immediate UI feedback
   statusBadge.className = 'status-badge status-recording';
   statusBadge.textContent = 'Starting...';
   recordingBar.classList.add('active');
-  recTabCount.textContent = selectedTabIds.size;
+  recTabCount.textContent = tabIds.length;
   btnRecord.style.display = 'none';
   btnStop.style.display = 'flex';
   btnStop.disabled = false;
   btnStop.textContent = '⏹ Stop';
 
-  // Add timeout so we don't hang if service worker is unresponsive
-  let timedOut = false;
-  const timeout = setTimeout(() => {
-    if (!isRecording) return;
-    timedOut = true;
-    showError('Service worker not responding. Reload extension from chrome://extensions and try again.');
-    resetUI();
-  }, 10000);
+  try {
+    // Capture each selected tab using chrome.tabCapture
+    // This MUST be called with a user gesture (the Record button click counts)
+    const combinedStream = new MediaStream();
 
-  chrome.runtime.sendMessage({
-    type: 'START_RECORDING',
-    tabIds: Array.from(selectedTabIds)
-  }, (response) => {
-    clearTimeout(timeout);
-    if (timedOut) return;
-    if (response && response.success) {
-      startTimer();
-    } else {
-      const err = (response && response.error) || 'Could not start recording — check the service worker console for errors.';
-      showError(err);
+    for (const tabId of tabIds) {
+      try {
+        const stream = await chrome.tabCapture.capture({ audio: true, video: false });
+        if (stream) {
+          const tracks = stream.getAudioTracks();
+          console.log('[Popup] Captured tab', tabId, '— tracks:', tracks.length);
+          tracks.forEach(track => combinedStream.addTrack(track));
+          tabStreams.push(stream);
+        } else {
+          console.warn('[Popup] tabCapture returned null for tab', tabId);
+        }
+      } catch (err) {
+        console.warn('[Popup] tabCapture error for tab', tabId, ':', err.message);
+      }
+    }
+
+    if (combinedStream.getAudioTracks().length === 0) {
+      showError('Could not capture audio from any selected tab. Make sure audio is playing in the tab.');
       resetUI();
+      return;
     }
-  });
-}
 
-function stopRecording() {
-  btnStop.disabled = true;
-  btnStop.textContent = 'Saving...';
-  isRecording = false;
-  stopTimer();
+    // Record from the combined stream
+    mediaRecorder = new MediaRecorder(combinedStream, { mimeType: 'audio/webm;codecs=opus' });
 
-  chrome.runtime.sendMessage({ type: 'STOP_RECORDING' }, (response) => {
-    if (!response || !response.success) {
-      showError((response && response.error) || 'Could not stop recording');
-    }
-    updateRecordingUI('saving', selectedTabIds.size);
-  });
-}
+    mediaRecorder.ondataavailable = (e) => {
+      if (e.data && e.data.size > 0) {
+        e.data.arrayBuffer().then(buf => {
+          audioChunks.push(buf);
+          console.log('[Popup] Chunk', audioChunks.length, '— size:', (e.data.size / 1024).toFixed(1), 'KB');
+        });
+      }
+    };
 
-function updateRecordingUI(state, tabCount) {
-  if (state === 'recording') {
-    statusBadge.className = 'status-badge status-recording';
+    mediaRecorder.onerror = (e) => {
+      console.error('[Popup] MediaRecorder error:', e.error);
+      showError('Recording error: ' + (e.error?.message || 'Unknown error'));
+      resetUI();
+    };
+
+    mediaRecorder.start(500); // collect every 500ms
     statusBadge.textContent = 'REC';
-    recordingBar.classList.add('active');
-    recTabCount.textContent = tabCount;
-    btnRecord.style.display = 'none';
-    btnStop.style.display = 'flex';
-    btnStop.disabled = false;
-    btnStop.textContent = '⏹ Stop';
-  } else if (state === 'saving') {
-    statusBadge.className = 'status-badge status-saving';
-    statusBadge.textContent = 'Saving';
-    btnStop.textContent = 'Saving...';
+    startTimer();
+    console.log('[Popup] Recording started, active tracks:', combinedStream.getAudioTracks().length);
+
+  } catch (err) {
+    console.error('[Popup] startRecording error:', err.message);
+    showError('Failed to start recording: ' + err.message);
+    resetUI();
   }
 }
+
+async function stopRecording() {
+  if (!isRecording) return;
+
+  btnStop.disabled = true;
+  btnStop.textContent = 'Saving...';
+  statusBadge.textContent = 'Saving';
+  stopTimer();
+
+  // Stop all captured tab streams
+  for (const stream of tabStreams) {
+    stream.getAudioTracks().forEach(track => track.stop());
+  }
+  tabStreams = [];
+
+  // Stop the recorder
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+    mediaRecorder.stop();
+  }
+  mediaRecorder = null;
+
+  // Wait briefly for final chunk
+  await new Promise(r => setTimeout(r, 300));
+
+  console.log('[Popup] Total chunks:', audioChunks.length);
+  if (audioChunks.length === 0) {
+    showError('No audio recorded. Try again.');
+    resetUI();
+    return;
+  }
+
+  // Combine all chunks
+  const totalSize = audioChunks.reduce((s, buf) => s + buf.byteLength, 0);
+  const combined = new Uint8Array(totalSize);
+  let offset = 0;
+  for (const buf of audioChunks) {
+    combined.set(new Uint8Array(buf), offset);
+    offset += buf.byteLength;
+  }
+
+  const blob = new Blob([combined], { type: 'audio/webm' });
+  const blobUrl = URL.createObjectURL(blob);
+  console.log('[Popup] Final blob:', (blob.size / 1024).toFixed(1), 'KB');
+
+  // Convert to data URL for transfer to background (service worker can't access blob URL)
+  const reader = new FileReader();
+  reader.onloadend = async () => {
+    const dataUrl = reader.result;
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const title = `Tab Recording ${timestamp}`;
+
+    // Send to background for upload
+    chrome.runtime.sendMessage({
+      type: 'FINALIZE_RECORDING',
+      blob: dataUrl,
+      title: title,
+    }, (response) => {
+      if (response && response.success) {
+        showSuccess(title, selectedTabIds.size);
+      } else {
+        showError(response?.error || 'Upload failed');
+        resetUI();
+      }
+    });
+  };
+  reader.readAsDataURL(blob);
+}
+
+// ─── UI Helpers ────────────────────────────────────────────────────────────────
 
 function startTimer() {
   timerInterval = setInterval(() => {
@@ -230,7 +295,7 @@ function stopTimer() {
 function showError(msg) {
   errorBanner.textContent = '⚠ ' + msg;
   errorBanner.className = 'error-banner active';
-  setTimeout(() => { errorBanner.className = 'error-banner'; }, 5000);
+  setTimeout(() => { errorBanner.className = 'error-banner'; }, 6000);
 }
 
 function showSuccess(title, tabCount) {
@@ -258,11 +323,11 @@ function resetUI() {
   btnStop.style.display = 'none';
   btnCancel.style.display = 'flex';
   btnCancel.disabled = false;
-  btnCancel.innerHTML = 'Clear';
+  btnCancel.textContent = 'Clear';
   recTimer.textContent = '00:00';
   updateSelectedChips();
   updateButtons();
-  loadTabs();
+  loadTabsWithTimeout();
 }
 
 function escapeHtml(str) {
@@ -271,16 +336,8 @@ function escapeHtml(str) {
   return div.innerHTML;
 }
 
-// Message listener
-chrome.runtime.onMessage.addListener((msg) => {
-  if (msg.type === 'RECORDING_STATE') updateRecordingUI('recording', msg.tabCount);
-  if (msg.type === 'RECORDING_COMPLETE') showSuccess(msg.title, msg.tabCount);
-  if (msg.type === 'TAB_CAPTURE_ERROR') showError(msg.error || 'Cannot capture tab');
-  if (msg.type === 'RECORDING_ERROR') showError('Error: ' + (msg.error || 'unknown'));
-  if (msg.type === 'UPLOAD_FAILED') showError('Upload failed: ' + (msg.error || ''));
-});
+// ─── Event Listeners ─────────────────────────────────────────────────────────
 
-// Delegated click handler — catches clicks on dynamically rendered tab items
 tabList.addEventListener('click', (e) => {
   const item = e.target.closest('.tab-item');
   if (!item || isRecording) return;
@@ -288,7 +345,6 @@ tabList.addEventListener('click', (e) => {
   if (!isNaN(tabId)) selectTab(tabId);
 });
 
-// Delegated click for chip remove buttons
 selectedChips.addEventListener('click', (e) => {
   const btn = e.target.closest('[data-remove-id]');
   if (!btn || isRecording) return;
@@ -296,12 +352,10 @@ selectedChips.addEventListener('click', (e) => {
   if (!isNaN(tabId)) removeTab(tabId);
 });
 
-// Delegated click for Clear button
-document.getElementById('btnCancel')?.addEventListener('click', clearSelection);
+btnCancel?.addEventListener('click', clearSelection);
+btnRecord?.addEventListener('click', startRecording);
+btnStop?.addEventListener('click', stopRecording);
 
-// Delegated click for Record and Stop buttons
-document.getElementById('btnRecord')?.addEventListener('click', startRecording);
-document.getElementById('btnStop')?.addEventListener('click', stopRecording);
+// ─── Start ──────────────────────────────────────────────────────────────────
 
-// Start
 init();
