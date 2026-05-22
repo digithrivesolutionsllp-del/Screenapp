@@ -6,8 +6,7 @@
   "permissions": [
     "tabs",
     "scripting",
-    "tabCapture",
-    "storage"
+    "tabCapture"
   ],
   "host_permissions": [
     "<all_urls>"

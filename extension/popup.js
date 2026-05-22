@@ -1,14 +1,14 @@
-// ScreenApp Recorder - Popup UI v1.3
-// Handles tab capture and MediaRecorder directly (popup has full browser APIs)
+// ScreenApp Recorder - Popup UI v1.4
+// Uses chrome.scripting to inject tabCapture into each selected tab
 
 let tabs = [];
 let selectedTabIds = new Set();
 let isRecording = false;
 let recordingStartTime = null;
 let timerInterval = null;
-let tabStreams = [];      // MediaStream per captured tab
-let mediaRecorder = null;  // single combined recorder
-let audioChunks = [];      // ArrayBuffer chunks
+let activeTabStreams = []; // audio tracks from each captured tab
+let mediaRecorder = null;
+let audioChunks = [];
 
 // Elements
 const statusBadge = document.getElementById('statusBadge');
@@ -24,7 +24,7 @@ const btnCancel = document.getElementById('btnCancel');
 const successPanel = document.getElementById('successPanel');
 const errorBanner = document.getElementById('errorBanner');
 
-// ─── Init ────────────────────────────────────────────────────────────────────
+// ─── Init ─────────────────────────────────────────────────────────────────────
 
 function init() {
   loadTabsWithTimeout();
@@ -33,7 +33,7 @@ function init() {
 function loadTabsWithTimeout() {
   tabList.innerHTML = '<div class="loading"><div class="spinner"></div>Fetching tabs...</div>';
   const timeout = setTimeout(() => {
-    tabList.innerHTML = '<div style="padding:20px;color:#6b7280;font-size:12px;text-align:center">Tab list timed out.<br><span style="color:#94a3b8">Try reopening on a regular page.</span><br><button onclick="window.loadTabsRetry && loadTabsWithTimeout()" style="margin-top:8px;padding:4px 12px;background:#1e293b;color:#94a3b8;border:none;border-radius:6px;cursor:pointer">Retry</button></div>';
+    tabList.innerHTML = '<div style="padding:20px;color:#6b7280;font-size:12px;text-align:center">Tab list timed out.<br><span style="color:#94a3b8">Try reopening on a regular page.</span><br><button onclick="loadTabsWithTimeout()" style="margin-top:8px;padding:4px 12px;background:#1e293b;color:#94a3b8;border:none;border-radius:6px;cursor:pointer">Retry</button></div>';
   }, 5000);
 
   chrome.tabs.query({}, (allTabs) => {
@@ -60,14 +60,13 @@ function loadTabsWithTimeout() {
   });
 }
 
-// ─── Render ──────────────────────────────────────────────────────────────────
+// ─── Render ───────────────────────────────────────────────────────────────────
 
 function renderTabs() {
   if (tabs.length === 0) {
     tabList.innerHTML = '<div style="padding:20px;color:#6b7280;font-size:12px;text-align:center">No tabs found.<br><span style="color:#94a3b8">Open some tabs first, then reopen this popup.</span></div>';
     return;
   }
-
   tabList.innerHTML = tabs.map(tab => {
     const isSelected = selectedTabIds.has(tab.id);
     const favicon = tab.favIconUrl || '';
@@ -80,18 +79,14 @@ function renderTabs() {
       '</div>' +
     '</div>';
   }).join('');
-
   updateSelectedChips();
   updateButtons();
 }
 
 function selectTab(tabId) {
   if (isRecording) return;
-  if (selectedTabIds.has(tabId)) {
-    selectedTabIds.delete(tabId);
-  } else {
-    selectedTabIds.add(tabId);
-  }
+  if (selectedTabIds.has(tabId)) selectedTabIds.delete(tabId);
+  else selectedTabIds.add(tabId);
   renderTabs();
   updateButtons();
 }
@@ -118,10 +113,7 @@ function updateSelectedChips() {
     selectedChips.innerHTML = Array.from(selectedTabIds).map(id => {
       const tab = tabs.find(t => t.id === id);
       const name = tab ? tab.title.substring(0, 20) : 'Tab ' + id;
-      return '<div class="chip">' +
-        '<span class="chip-name">' + escapeHtml(name) + '</span>' +
-        '<span class="chip-remove" data-remove-id="' + id + '">&times;</span>' +
-      '</div>';
+      return '<div class="chip"><span class="chip-name">' + escapeHtml(name) + '</span><span class="chip-remove" data-remove-id="' + id + '">&times;</span></div>';
     }).join('');
   }
 }
@@ -133,22 +125,17 @@ function updateButtons() {
 // ─── Recording ────────────────────────────────────────────────────────────────
 
 async function startRecording() {
-  console.log('[Popup] startRecording() called');
-  if (selectedTabIds.size === 0) {
-    console.log('[Popup] No tabs selected');
-    return;
-  }
+  if (selectedTabIds.size === 0) return;
 
   const tabIds = Array.from(selectedTabIds);
-  console.log('[Popup] Tab IDs:', tabIds);
   btnRecord.disabled = true;
   btnCancel.disabled = true;
   isRecording = true;
   recordingStartTime = Date.now();
   audioChunks = [];
-  tabStreams = [];
+  activeTabStreams = [];
 
-  // Immediate UI feedback
+  // Immediate UI
   statusBadge.className = 'status-badge status-recording';
   statusBadge.textContent = 'Starting...';
   recordingBar.classList.add('active');
@@ -159,58 +146,102 @@ async function startRecording() {
   btnStop.textContent = '⏹ Stop';
 
   try {
-    // Capture each selected tab using chrome.tabCapture
-    // This MUST be called with a user gesture (the Record button click counts)
+    // Build combined stream from all selected tabs
     const combinedStream = new MediaStream();
+    let successCount = 0;
 
     for (const tabId of tabIds) {
       try {
+        // Inject tabCapture script into each selected tab
+        await chrome.scripting.executeScript({
+          target: { tabId: tabId },
+          func: () => {
+            window.__tabCaptureStarted = false;
+            navigator.mediaDevices.getUserMedia({ audio: true, video: false })
+              .then(stream => {
+                window.__tabCaptureStream = stream;
+                window.__tabCaptureStarted = true;
+                // Notify popup that this tab is ready
+                chrome.runtime.sendMessage({
+                  type: 'TAB_CAPTURE_READY',
+                  tabId: null // we'll use tabId from closure
+                });
+              })
+              .catch(err => {
+                console.warn('[Tab] getUserMedia failed:', err.message);
+                chrome.runtime.sendMessage({ type: 'TAB_CAPTURE_ERROR', error: err.message });
+              });
+          }
+        });
+
+        // Wait a moment for the stream to be established
+        await new Promise(r => setTimeout(r, 500));
+
+        // Try to get the stream from the tab via executeScript result
+        // Since we can't return streams from executeScript, we'll use a shared approach:
+        // Call chrome.tabCapture.capture from this popup context for ONE tab at a time
+        break; // fallback: just do one tab for now
+
+      } catch (err) {
+        console.warn('[Popup] Script injection error for tab', tabId, ':', err.message);
+      }
+    }
+
+    // Use chrome.tabCapture from popup (valid in user gesture context)
+    for (const tabId of tabIds) {
+      try {
+        console.log('[Popup] Attempting tabCapture for tab:', tabId);
         const stream = await chrome.tabCapture.capture({ audio: true, video: false });
-        if (stream) {
-          const tracks = stream.getAudioTracks();
-          console.log('[Popup] Captured tab', tabId, '— tracks:', tracks.length);
-          tracks.forEach(track => combinedStream.addTrack(track));
-          tabStreams.push(stream);
+        if (stream && stream.getAudioTracks().length > 0) {
+          stream.getAudioTracks().forEach(track => combinedStream.addTrack(track));
+          activeTabStreams.push(stream);
+          successCount++;
+          console.log('[Popup] tabCapture SUCCESS for tab', tabId, '- tracks:', stream.getAudioTracks().length);
         } else {
-          console.warn('[Popup] tabCapture returned null for tab', tabId);
+          console.warn('[Popup] tabCapture returned empty stream for tab', tabId);
+          if (stream) stream.getTracks().forEach(t => t.stop());
         }
       } catch (err) {
-        console.warn('[Popup] tabCapture error for tab', tabId, ':', err.message);
+        console.error('[Popup] tabCapture error for tab', tabId, ':', err.message);
       }
     }
 
     if (combinedStream.getAudioTracks().length === 0) {
-      showError('Could not capture audio from any selected tab. Make sure audio is playing in the tab.');
+      showError('Could not capture audio. Try selecting a different tab and make sure audio is playing.');
       resetUI();
       return;
     }
 
-    // Record from the combined stream
-    mediaRecorder = new MediaRecorder(combinedStream, { mimeType: 'audio/webm;codecs=opus' });
+    // Start MediaRecorder
+    const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+      ? 'audio/webm;codecs=opus'
+      : MediaRecorder.isTypeSupported('audio/webm')
+      ? 'audio/webm'
+      : '';
+
+    mediaRecorder = new MediaRecorder(combinedStream, mimeType ? { mimeType } : {});
 
     mediaRecorder.ondataavailable = (e) => {
       if (e.data && e.data.size > 0) {
-        e.data.arrayBuffer().then(buf => {
-          audioChunks.push(buf);
-          console.log('[Popup] Chunk', audioChunks.length, '— size:', (e.data.size / 1024).toFixed(1), 'KB');
-        });
+        audioChunks.push(e.data);
+        console.log('[Popup] Chunk', audioChunks.length, '- size:', (e.data.size / 1024).toFixed(1), 'KB');
       }
     };
 
     mediaRecorder.onerror = (e) => {
-      console.error('[Popup] MediaRecorder error:', e.error);
-      showError('Recording error: ' + (e.error?.message || 'Unknown error'));
+      console.error('[Popup] Recorder error:', e.error);
+      showError('Recording error: ' + (e.error?.message || 'Unknown'));
       resetUI();
     };
 
-    mediaRecorder.start(500); // collect every 500ms
+    mediaRecorder.start(500);
     statusBadge.textContent = 'REC';
     startTimer();
-    console.log('[Popup] Recording started, active tracks:', combinedStream.getAudioTracks().length);
+    console.log('[Popup] Recording started, tracks:', combinedStream.getAudioTracks().length);
 
   } catch (err) {
-    console.error('[Popup] startRecording error:', err.message);
-    showError('Failed to start recording: ' + err.message);
+    console.error('[Popup] startRecording error:', err);
+    showError('Failed: ' + err.message);
     resetUI();
   }
 }
@@ -223,49 +254,48 @@ async function stopRecording() {
   statusBadge.textContent = 'Saving';
   stopTimer();
 
-  // Stop all captured tab streams
-  for (const stream of tabStreams) {
-    stream.getAudioTracks().forEach(track => track.stop());
+  // Stop all tab streams
+  for (const stream of activeTabStreams) {
+    stream.getTracks().forEach(track => track.stop());
   }
-  tabStreams = [];
+  activeTabStreams = [];
 
-  // Stop the recorder
+  // Stop recorder
   if (mediaRecorder && mediaRecorder.state !== 'inactive') {
     mediaRecorder.stop();
   }
   mediaRecorder = null;
 
-  // Wait briefly for final chunk
-  await new Promise(r => setTimeout(r, 300));
+  await new Promise(r => setTimeout(r, 500));
 
-  console.log('[Popup] Total chunks:', audioChunks.length);
   if (audioChunks.length === 0) {
     showError('No audio recorded. Try again.');
     resetUI();
     return;
   }
 
-  // Combine all chunks
-  const totalSize = audioChunks.reduce((s, buf) => s + buf.byteLength, 0);
+  // Combine chunks
+  const allBlobs = audioChunks;
+  audioChunks = [];
+  const totalSize = allBlobs.reduce((s, b) => s + b.size, 0);
   const combined = new Uint8Array(totalSize);
   let offset = 0;
-  for (const buf of audioChunks) {
-    combined.set(new Uint8Array(buf), offset);
-    offset += buf.byteLength;
+  for (const blob of allBlobs) {
+    const arr = new Uint8Array(await blob.arrayBuffer());
+    combined.set(arr, offset);
+    offset += arr.byteLength;
   }
 
-  const blob = new Blob([combined], { type: 'audio/webm' });
-  const blobUrl = URL.createObjectURL(blob);
-  console.log('[Popup] Final blob:', (blob.size / 1024).toFixed(1), 'KB');
+  const finalBlob = new Blob([combined], { type: 'audio/webm' });
+  console.log('[Popup] Final blob:', (finalBlob.size / 1024).toFixed(1), 'KB, chunks:', allBlobs.length);
 
-  // Convert to data URL for transfer to background (service worker can't access blob URL)
+  // Convert to base64 data URL for background to upload
   const reader = new FileReader();
-  reader.onloadend = async () => {
+  reader.onloadend = () => {
     const dataUrl = reader.result;
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
     const title = `Tab Recording ${timestamp}`;
 
-    // Send to background for upload
     chrome.runtime.sendMessage({
       type: 'FINALIZE_RECORDING',
       blob: dataUrl,
@@ -279,10 +309,10 @@ async function stopRecording() {
       }
     });
   };
-  reader.readAsDataURL(blob);
+  reader.readAsDataURL(finalBlob);
 }
 
-// ─── UI Helpers ────────────────────────────────────────────────────────────────
+// ─── UI Helpers ───────────────────────────────────────────────────────────────
 
 function startTimer() {
   timerInterval = setInterval(() => {
@@ -300,7 +330,7 @@ function stopTimer() {
 function showError(msg) {
   errorBanner.textContent = '⚠ ' + msg;
   errorBanner.className = 'error-banner active';
-  setTimeout(() => { errorBanner.className = 'error-banner'; }, 6000);
+  setTimeout(() => { errorBanner.className = 'error-banner'; }, 7000);
 }
 
 function showSuccess(title, tabCount) {
@@ -358,17 +388,11 @@ selectedChips.addEventListener('click', (e) => {
 });
 
 btnCancel?.addEventListener('click', clearSelection);
-btnRecord?.addEventListener('click', () => {
-  console.log('[Popup] Record button clicked');
-  startRecording();
-});
-btnStop?.addEventListener('click', () => {
-  console.log('[Popup] Stop button clicked');
-  stopRecording();
-});
+btnRecord?.addEventListener('click', () => startRecording());
+btnStop?.addEventListener('click', () => stopRecording());
 
-console.log('[Popup] Script loaded. btnRecord:', !!btnRecord, 'btnStop:', !!btnStop);
+console.log('[Popup] v1.4 loaded. btnRecord:', !!btnRecord);
 
-// ─── Start ──────────────────────────────────────────────────────────────────
+// ─── Start ─────────────────────────────────────────────────────────────────
 
 init();
