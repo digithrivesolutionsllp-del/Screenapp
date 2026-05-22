@@ -34,15 +34,32 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
-  // Forward TAB_CAPTURE_READY and TAB_CAPTURE_ERROR to popup
-  if (msg.type === 'TAB_CAPTURE_READY' || msg.type === 'TAB_CAPTURE_ERROR') {
-    chrome.runtime.sendMessage(msg);
-    sendResponse({ success: true });
+  // Fetch recording details from backend and relay to popup
+  if (msg.type === 'REFRESH_DASHBOARD') {
+    fetchRecordingDetails(msg.recordingId).then(details => {
+      chrome.runtime.sendMessage({ type: 'RECORDING_DETAILS', ...details });
+      sendResponse({ success: true });
+    }).catch(err => {
+      sendResponse({ success: false, error: err.message });
+    });
     return true;
   }
 
   sendResponse({ success: false });
 });
+
+async function fetchRecordingDetails(recordingId) {
+  try {
+    const response = await fetch(`${API_BASE}/api/recordings/${recordingId}`);
+    if (response.ok) {
+      const data = await response.json();
+      return { recording: data };
+    }
+  } catch (err) {
+    console.error('[BG] fetchRecordingDetails error:', err.message);
+  }
+  return {};
+}
 
 // ─── Upload Recording ────────────────────────────────────────────────────────
 

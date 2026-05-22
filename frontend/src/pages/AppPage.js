@@ -722,7 +722,7 @@ const deleteRecording = async (recordingId) => {
                           )}
                           {rec.audioUrl && <span className="text-xs bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded-full font-medium">Recorded</span>}
                         </div>
-                        <div className="text-xs text-gray-400 mt-0.5">{formatDateTime(rec.created_at)}{rec.size ? ` · ${formatBytes(rec.size)}` : ''}{rec.duration ? ` · ${formatTime(rec.duration)}` : ''}</div>
+                        <div className="text-xs text-gray-400 mt-0.5">{formatDateTime(rec.created_at)}{rec.size ? ` · ${formatBytes(rec.size)}` : ''}{rec.duration ? ` · ${formatTime(rec.duration)}` : rec._duration ? ` · ${formatTime(rec._duration)}` : ''}</div>
                       </div>
                       <ChevronRight className="w-4 h-4 text-gray-300 group-hover:text-gray-500 transition-colors duration-150 flex-shrink-0" />
                     </button>
@@ -797,7 +797,21 @@ const deleteRecording = async (recordingId) => {
                           <div className="text-xs text-gray-400">{formatDateTime(selectedRecording.created_at)}{selectedRecording.size ? ` · ${formatBytes(selectedRecording.size)}` : ''}</div>
                         </div>
                       </div>
-                      <audio controls preload="metadata" src={selectedRecording.audioUrl} className="w-full rounded-lg" style={{ height: 40 }} />
+                      <div className="bg-gray-50 border border-gray-200 rounded-2xl p-5">
+                        <div className="flex items-center gap-3 mb-3">
+                          <div className="w-8 h-8 rounded-full bg-emerald-100 flex items-center justify-center"><Mic className="w-4 h-4 text-emerald-600" /></div>
+                          <div>
+                            <div className="text-sm font-semibold text-gray-900">{selectedRecording.title}</div>
+                            <div className="text-xs text-gray-400">{formatDateTime(selectedRecording.created_at)}{selectedRecording.size ? ` · ${formatBytes(selectedRecording.size)}` : ''}{selectedRecording.duration ? ` · ${formatTime(selectedRecording.duration)}` : ''}</div>
+                          </div>
+                        </div>
+                        <audio ref={el => {
+                          if (!el) return;
+                          el.onloadedmetadata = () => {
+                            el.currentTime = 0;
+                          };
+                        }} controls preload="metadata" src={selectedRecording.audioUrl} className="w-full rounded-lg" style={{ height: 40 }} />
+                      </div>
                     </div>
                   </div>
                 ) : (

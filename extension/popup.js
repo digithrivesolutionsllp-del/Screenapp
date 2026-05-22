@@ -23,6 +23,10 @@ const btnStop = document.getElementById('btnStop');
 const btnCancel = document.getElementById('btnCancel');
 const successPanel = document.getElementById('successPanel');
 const errorBanner = document.getElementById('errorBanner');
+const liveRecPanel = document.getElementById('liveRecPanel');
+const liveTabCount = document.getElementById('liveTabCount');
+const liveTimer = document.getElementById('liveTimer');
+const btnLiveStop = document.getElementById('btnLiveStop');
 
 // ─── Init ─────────────────────────────────────────────────────────────────────
 
@@ -141,7 +145,8 @@ async function startRecording() {
   statusBadge.className = 'status-badge status-recording';
   statusBadge.textContent = 'Starting...';
   recordingBar.classList.add('active');
-  recTabCount.textContent = tabIds.length;
+  liveRecPanel.classList.add('active');
+  liveTabCount.textContent = tabIds.length;
   btnRecord.style.display = 'none';
   btnStop.style.display = 'flex';
   btnStop.disabled = false;
@@ -321,7 +326,9 @@ function startTimer() {
     const elapsed = Math.floor((Date.now() - recordingStartTime) / 1000);
     const mins = String(Math.floor(elapsed / 60)).padStart(2, '0');
     const secs = String(elapsed % 60).padStart(2, '0');
-    recTimer.textContent = mins + ':' + secs;
+    const time = mins + ':' + secs;
+    recTimer.textContent = time;
+    if (liveTimer) liveTimer.textContent = time;
   }, 1000);
 }
 
@@ -354,6 +361,7 @@ function resetUI() {
   statusBadge.textContent = 'Idle';
   recordingBar.classList.remove('active');
   successPanel.classList.remove('active');
+  liveRecPanel.classList.remove('active');
   errorBanner.className = 'error-banner';
   btnRecord.style.display = 'flex';
   btnRecord.disabled = true;
@@ -392,6 +400,20 @@ selectedChips.addEventListener('click', (e) => {
 btnCancel?.addEventListener('click', clearSelection);
 btnRecord?.addEventListener('click', () => startRecording());
 btnStop?.addEventListener('click', () => stopRecording());
+btnLiveStop?.addEventListener('click', () => stopRecording());
+
+// Listen for recording complete from background
+chrome.runtime.onMessage.addListener((msg) => {
+  if (msg.type === 'RECORDING_COMPLETE') {
+    console.log('[Popup] Recording complete:', msg.recordingId);
+    showSuccess(msg.title || 'Recording saved', msg.tabCount || 1);
+  }
+  if (msg.type === 'UPLOAD_FAILED') {
+    console.error('[Popup] Upload failed:', msg.error);
+    showError('Upload failed: ' + msg.error);
+    resetUI();
+  }
+});
 
 console.log('[Popup] v1.4 loaded. btnRecord:', !!btnRecord);
 
