@@ -125,9 +125,11 @@ function updateButtons() {
 // ─── Recording ────────────────────────────────────────────────────────────────
 
 async function startRecording() {
+  console.log('[Popup] startRecording() called, selected tabs:', selectedTabIds.size);
   if (selectedTabIds.size === 0) return;
 
   const tabIds = Array.from(selectedTabIds);
+  console.log('[Popup] tabIds:', tabIds);
   btnRecord.disabled = true;
   btnCancel.disabled = true;
   isRecording = true;
