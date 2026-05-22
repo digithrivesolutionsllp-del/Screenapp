@@ -3,6 +3,7 @@
 
 let tabs = [];
 let selectedTabIds = new Set();
+let tabIds = [];         // current recording tab IDs (for state restore)
 let isRecording = false;
 let recordingStartTime = null;
 let timerInterval = null;
@@ -31,7 +32,44 @@ const btnLiveStop = document.getElementById('btnLiveStop');
 // ─── Init ─────────────────────────────────────────────────────────────────────
 
 function init() {
+  // Check if a recording is already in progress (popup reopened mid-recording)
+  chrome.runtime.sendMessage({ type: 'GET_RECORDING_STATE' }, (response) => {
+    if (response && response.state && response.state.status === 'recording') {
+      restoreRecordingState(response.state);
+    } else {
+      loadTabsWithTimeout();
+    }
+  });
+}
+
+function restoreRecordingState(state) {
+  console.log('[Popup] Restoring recording state:', state);
+  isRecording = true;
+  recordingStartTime = state.startTime || Date.now();
+  selectedTabIds = new Set(state.tabIds || []);
+  tabIds = state.tabIds || [];
+
+  // Restore live recording UI immediately
+  statusBadge.className = 'status-badge status-recording';
+  statusBadge.textContent = 'REC';
+  recordingBar.classList.add('active');
+  liveRecPanel.classList.add('active');
+  recTabCount.textContent = state.tabCount || 1;
+  liveTabCount.textContent = state.tabCount || 1;
+
+  btnRecord.style.display = 'none';
+  btnStop.style.display = 'flex';
+  btnStop.disabled = false;
+  btnCancel.disabled = true;
+
+  // Start the timer
+  startTimer();
+
+  // Note: tab list still shows since we didn't load them yet
+  // loadTabsWithTimeout() will refresh the tab list
   loadTabsWithTimeout();
+
+  console.log('[Popup] Recording state restored. Timer running, can stop from here.');
 }
 
 function loadTabsWithTimeout() {
@@ -146,6 +184,7 @@ async function startRecording() {
   statusBadge.textContent = 'Starting...';
   recordingBar.classList.add('active');
   liveRecPanel.classList.add('active');
+  recTabCount.textContent = tabIds.length;
   liveTabCount.textContent = tabIds.length;
   btnRecord.style.display = 'none';
   btnStop.style.display = 'flex';
@@ -244,11 +283,19 @@ async function startRecording() {
     mediaRecorder.start(500);
     statusBadge.textContent = 'REC';
     startTimer();
+    // Tell background we're recording so popup can restore state on reopen
+    chrome.runtime.sendMessage({
+      type: 'RECORDING_STARTED',
+      startTime: recordingStartTime,
+      tabIds: tabIds,
+      tabCount: tabIds.length
+    });
     console.log('[Popup] Recording started, tracks:', combinedStream.getAudioTracks().length);
 
   } catch (err) {
     console.error('[Popup] startRecording error:', err);
     showError('Failed: ' + err.message);
+    chrome.runtime.sendMessage({ type: 'RECORDING_STOPPED' });
     resetUI();
   }
 }
@@ -260,6 +307,9 @@ async function stopRecording() {
   btnStop.textContent = 'Saving...';
   statusBadge.textContent = 'Saving';
   stopTimer();
+
+  // Tell background recording has stopped
+  chrome.runtime.sendMessage({ type: 'RECORDING_STOPPED' });
 
   // Stop all tab streams
   for (const stream of activeTabStreams) {

@@ -5,6 +5,14 @@ const API_BASE = 'http://localhost:8000';
 
 // ─── Message Handler ─────────────────────────────────────────────────────────
 
+// Track active recording in session storage so popup can restore state on open
+function setRecordingState(state) {
+  chrome.storage.session.set({ recordingState: state });
+}
+function getRecordingState() {
+  return chrome.storage.session.get('recordingState').then(r => r.recordingState || null);
+}
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   console.log('[BG] Message:', msg.type);
 
@@ -29,37 +37,40 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
+  // Start recording — save state so popup can restore it on next open
+  if (msg.type === 'RECORDING_STARTED') {
+    setRecordingState({
+      status: 'recording',
+      startTime: msg.startTime,
+      tabIds: msg.tabIds || [],
+      tabCount: msg.tabCount || 1
+    });
+    sendResponse({ success: true });
+    return true;
+  }
+
+  // Stop recording — clear state
+  if (msg.type === 'RECORDING_STOPPED') {
+    setRecordingState(null);
+    sendResponse({ success: true });
+    return true;
+  }
+
+  // Popup asks for current recording state on init
+  if (msg.type === 'GET_RECORDING_STATE') {
+    getRecordingState().then(state => {
+      sendResponse({ state });
+    });
+    return true;
+  }
+
   if (msg.type === 'FINALIZE_RECORDING') {
     finalizeRecording(msg.blob, msg.title, sendResponse);
     return true;
   }
 
-  // Fetch recording details from backend and relay to popup
-  if (msg.type === 'REFRESH_DASHBOARD') {
-    fetchRecordingDetails(msg.recordingId).then(details => {
-      chrome.runtime.sendMessage({ type: 'RECORDING_DETAILS', ...details });
-      sendResponse({ success: true });
-    }).catch(err => {
-      sendResponse({ success: false, error: err.message });
-    });
-    return true;
-  }
-
   sendResponse({ success: false });
 });
-
-async function fetchRecordingDetails(recordingId) {
-  try {
-    const response = await fetch(`${API_BASE}/api/recordings/${recordingId}`);
-    if (response.ok) {
-      const data = await response.json();
-      return { recording: data };
-    }
-  } catch (err) {
-    console.error('[BG] fetchRecordingDetails error:', err.message);
-  }
-  return {};
-}
 
 // ─── Upload Recording ────────────────────────────────────────────────────────
 
@@ -88,6 +99,7 @@ async function finalizeRecording(dataUrl, title, sendResponse) {
     if (response.ok) {
       const result = await response.json();
       console.log('[BG] Uploaded, ID:', result.id);
+      setRecordingState(null); // clear recording state after successful upload
       chrome.runtime.sendMessage({
         type: 'RECORDING_COMPLETE',
         recordingId: result.id,
@@ -98,6 +110,7 @@ async function finalizeRecording(dataUrl, title, sendResponse) {
     } else {
       const text = await response.text();
       console.error('[BG] Upload failed:', response.status, text);
+      setRecordingState(null);
       chrome.runtime.sendMessage({ type: 'UPLOAD_FAILED', error: `Upload failed: ${response.status}` });
       sendResponse({ success: false, error: `Upload failed: ${response.status}` });
     }
