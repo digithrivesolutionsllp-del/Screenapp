@@ -16,6 +16,10 @@ from app.models import RecordingResponse
 router = APIRouter(prefix="/api/recordings", tags=["recordings"])
 logger = logging.getLogger(__name__)
 
+# In-memory state for live recording status (shared across all requests)
+# This is per-process; in production you'd use Redis or similar
+_live_recording_state: dict | None = None
+
 
 class RecordingUpdate(BaseModel):
     title: str | None = None
@@ -27,6 +31,36 @@ def _serialize(doc: dict) -> dict:
     if isinstance(doc.get("created_at"), datetime):
         doc["created_at"] = doc["created_at"].isoformat()
     return doc
+
+
+# ─── Live Recording State ─────────────────────────────────────────────────────
+
+@router.get("/live-state")
+async def get_live_state():
+    """Returns current live recording status (tab count, start time, title)."""
+    return {"recording": _live_recording_state}
+
+
+@router.post("/live-state")
+async def set_live_state(title: str = Form(...), tab_count: int = Form(1), start_time: float = Form(...)):
+    """Called by extension when recording starts — notifies dashboard."""
+    global _live_recording_state
+    _live_recording_state = {
+        "title": title,
+        "tab_count": tab_count,
+        "start_time": start_time,
+        "recording": True
+    }
+    logger.info("Live recording started: %s (%d tabs)", title, tab_count)
+    return {"success": True}
+
+
+@router.delete("/live-state")
+async def clear_live_state():
+    """Called by extension when recording stops."""
+    global _live_recording_state
+    _live_recording_state = None
+    return {"success": True}
 
 
 @router.post("/upload")

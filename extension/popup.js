@@ -350,8 +350,10 @@ async function stopRecording() {
   const reader = new FileReader();
   reader.onloadend = () => {
     const dataUrl = reader.result;
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-    const title = `Tab Recording ${timestamp}`;
+    const now = new Date();
+    const timeStr = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const dateStr = now.toLocaleDateString([], { month: 'short', day: 'numeric' });
+    const title = `Tab Recording · ${dateStr} ${timeStr}`;
 
     chrome.runtime.sendMessage({
       type: 'FINALIZE_RECORDING',

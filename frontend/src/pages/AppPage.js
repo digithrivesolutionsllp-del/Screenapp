@@ -225,6 +225,7 @@ const AppPage = () => {
   const [isUploading, setIsUploading] = useState(false);
   const [folders, setFolders] = useState([]);
   const [activeFolder, setActiveFolder] = useState('root');
+  const [liveExtensionRecording, setLiveExtensionRecording] = useState(null); // { startTime, tabCount, title }
   const [showNewFolder, setShowNewFolder] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
   const [editingFolderId, setEditingFolderId] = useState(null);
@@ -266,6 +267,39 @@ const AppPage = () => {
     };
     loadRecordings();
   }, [activeFolder]);
+
+  // Auto-refresh recordings + live recording state every 10 seconds
+  useEffect(() => {
+    const interval = setInterval(async () => {
+      if (view !== 'dashboard') return;
+      try {
+        const [liveRes, recRes] = await Promise.all([
+          fetch('http://localhost:8000/api/recordings/live-state'),
+          fetch('http://localhost:8000/api/recordings?folder_id=')
+        ]);
+        // Update live recording status
+        if (liveRes.ok) {
+          const liveData = await liveRes.json();
+          const live = liveData && liveData.recording ? liveData : null;
+          setLiveExtensionRecording(prev => {
+            if (live && !prev) return { startTime: live.start_time, tabCount: live.tab_count, title: live.title };
+            if (!live && prev) return null;
+            return prev; // keep existing state, timer will re-render automatically
+          });
+        }
+        // Update recordings list
+        if (recRes.ok) {
+          const data = await recRes.json();
+          const list = Array.isArray(data) ? data : [];
+          const fresh = list.map(r => ({ ...r, id: r.id || r._id }));
+          const existingIds = new Set(recordings.map(r => r.id));
+          const newOnes = fresh.filter(r => !existingIds.has(r.id));
+          if (newOnes.length > 0) setRecordings(fresh);
+        }
+      } catch (err) { /* silent */ }
+    }, 10000);
+    return () => clearInterval(interval);
+  }, [view, recordings]);
 
   useEffect(() => {
     const loadFolders = async () => {
@@ -681,6 +715,39 @@ const deleteRecording = async (recordingId) => {
         {view === 'dashboard' && (
           <div className="flex-1 overflow-y-auto p-6">
             <div className="max-w-3xl">
+              {/* Live Extension Recording Panel */}
+              {liveExtensionRecording && (
+                <div className="mb-6 bg-red-50 border border-red-200 rounded-2xl p-4">
+                  <div className="flex items-center gap-3 mb-3">
+                    <div className="w-3 h-3 rounded-full bg-red-500 animate-pulse flex-shrink-0" />
+                    <span className="text-sm font-bold text-red-700">Recording in Progress</span>
+                    <span className="text-xs text-red-500 ml-auto">
+                      {(() => {
+                        const elapsed = Math.floor((Date.now() - liveExtensionRecording.startTime) / 1000);
+                        const m = String(Math.floor(elapsed / 60)).padStart(2, '0');
+                        const s = String(elapsed % 60).padStart(2, '0');
+                        return `${m}:${s}`;
+                      })()}
+                    </span>
+                  </div>
+                  <p className="text-xs text-red-600 mb-3">
+                    {liveExtensionRecording.tabCount} tab(s) being recorded via Chrome Extension.
+                    Stop the recording in the extension popup to save and upload.
+                  </p>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => setShowExtension(true)}
+                      className="text-xs font-medium px-3 py-1.5 rounded-full bg-red-100 text-red-700 hover:bg-red-200 transition-colors"
+                    >
+                      Open Extension to Stop
+                    </button>
+                    <span className="text-xs text-red-400 self-center">
+                      Live panel appears when extension is actively recording
+                    </span>
+                  </div>
+                </div>
+              )}
+
               <h1 className="text-2xl font-bold text-gray-900 mb-1">Welcome back!</h1>
               <p className="text-gray-500 text-sm mb-8">Start a new recording or continue where you left off.</p>
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-8">

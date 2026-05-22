@@ -39,12 +39,23 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   // Start recording — save state so popup can restore it on next open
   if (msg.type === 'RECORDING_STARTED') {
-    setRecordingState({
+    const state = {
       status: 'recording',
       startTime: msg.startTime,
       tabIds: msg.tabIds || [],
       tabCount: msg.tabCount || 1
-    });
+    };
+    setRecordingState(state);
+    // Notify backend so dashboard can show live recording status
+    fetch(`${API_BASE}/api/recordings/live-state`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        title: `Recording ${msg.tabCount} tab(s)`,
+        tab_count: String(msg.tabCount || 1),
+        start_time: String(msg.startTime || Date.now())
+      })
+    }).catch(err => console.warn('[BG] live-state start failed:', err));
     sendResponse({ success: true });
     return true;
   }
@@ -52,6 +63,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   // Stop recording — clear state
   if (msg.type === 'RECORDING_STOPPED') {
     setRecordingState(null);
+    fetch(`${API_BASE}/api/recordings/live-state`, { method: 'DELETE' }).catch(err => console.warn('[BG] live-state clear failed:', err));
     sendResponse({ success: true });
     return true;
   }
