@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 # In-memory state for live recording status (shared across all requests)
 # This is per-process; in production you'd use Redis or similar
-_live_recording_state: dict | None = None
+_live_recording_state = None
 
 
 class RecordingUpdate(BaseModel):
