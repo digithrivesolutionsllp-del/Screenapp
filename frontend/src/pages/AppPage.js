@@ -4,17 +4,19 @@ import {
   AudioWaveform, Home, Folder, Star, Plus, Search, Settings,
   Mic, Square, Pause, Play, Volume2, Download, Share2,
   ChevronRight, Send, Clock, MoreHorizontal, X, FileText,
-  CheckSquare, MessageSquare, Upload, ArrowLeft, Trash2
+  CheckSquare, MessageSquare, Upload, ArrowLeft, Trash2,
+  Globe, ExternalLink, Copy, Info, Link, Mail, Lock, User
 } from 'lucide-react';
-import { uploadRecording as apiUploadRecording, getRecordings as apiGetRecordings, transcribeRecording as apiTranscribeRecording, summarizeRecording as apiSummarizeRecording, chatWithRecording as apiChatWithRecording, getFolders, createFolder, renameFolder, deleteFolder, updateRecording } from '../lib/api';
+import { uploadRecording as apiUploadRecording, getRecordings as apiGetRecordings, transcribeRecording as apiTranscribeRecording, summarizeRecording as apiSummarizeRecording, chatWithRecording as apiChatWithRecording, getFolders, createFolder, renameFolder, deleteFolder, updateRecording, updateRecordingStatus, loginUser, registerUser, logoutUser, getCurrentUser } from '../lib/api';
 
 const BRAND_BLUE = '#4175F5';
+const API_BASE = (typeof process !== 'undefined' && process.env.REACT_APP_API_URL) || 'http://localhost:8000/api';
 const SPEAKER_COLORS = {
   John: 'text-blue-500', Sarah: 'text-violet-500', Mike: 'text-emerald-500',
   Client: 'text-orange-500', You: 'text-rose-500'
 };
 const formatTime = (s) =>
-  `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
+  `${String(Math.floor(s > 0 && Number.isFinite(s) ? s / 60 : 0)).padStart(2, '0')}:${String(s > 0 && Number.isFinite(s) ? s % 60 : 0).padStart(2, '0')}`;
 
 const formatBytes = (bytes) => {
   if (!bytes) return '';
@@ -27,22 +29,36 @@ const formatDateTime = (dateStr) => {
   if (!dateStr) return '';
   try {
     const d = new Date(dateStr);
+    // Ensure we're comparing in the same timezone — d.toLocaleDateString uses local timezone
+    const dDate = d.toLocaleDateString([], { month: 'short', day: 'numeric' });
     const now = new Date();
+    const nowDate = now.toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' });
+    const dTime = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     const diffMs = now - d;
     const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
     if (diffDays === 0) {
-      return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      // Same day — show "Today · HH:MM"
+      return 'Today · ' + dTime;
     } else if (diffDays === 1) {
       return 'Yesterday';
     } else if (diffDays < 7) {
       return `${diffDays} days ago`;
     } else {
-      return d.toLocaleDateString([], { month: 'short', day: 'numeric', year: diffDays > 365 ? 'numeric' : undefined });
+      return dDate + (diffDays > 365 ? ' · ' + d.getFullYear() : '');
     }
   } catch {
     return dateStr;
   }
 };
+
+// --- Toast helper (inline, no external deps) ---
+const Toast = ({ message, onClose }) => (
+  <div className="fixed bottom-6 right-6 z-[200] flex items-center gap-3 bg-gray-900 text-white px-4 py-3 rounded-xl shadow-2xl animate-in fade-in slide-in-from-bottom-2 duration-200">
+    <CheckSquare className="w-4 h-4 text-emerald-400 flex-shrink-0" />
+    <span className="text-sm font-medium">{message}</span>
+    <button onClick={onClose} className="text-gray-400 hover:text-white ml-1"><X className="w-4 h-4" /></button>
+  </div>
+);
 
 // --- Real Waveform Component ---
 const RecordingWaveform = ({ isActive, liveHeights }) => {
@@ -167,7 +183,7 @@ const ChromeExtModal = ({ onClose, onSave }) => {
             <div className="flex items-center justify-center gap-2 mb-3 text-sm text-red-500 font-semibold">
               <div className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
               Recording {formatTime(recTime)}
-              {toggles.tabAudio && <span className="text-xs text-gray-400 font-normal ml-1">• Tab audio</span>}
+              {toggles.tabAudio && <span className="text-xs text-gray-400 font-normal ml-1">- Tab audio</span>}
             </div>
           )}
 
@@ -179,7 +195,7 @@ const ChromeExtModal = ({ onClose, onSave }) => {
               <ol className="space-y-1.5 text-xs text-blue-700">
                 <li className="flex gap-1.5"><span className="font-bold flex-shrink-0">1.</span> Open YouTube (or other tab) and start playing</li>
                 <li className="flex gap-1.5"><span className="font-bold flex-shrink-0">2.</span> Click <strong>"Start Recording"</strong> below</li>
-                <li className="flex gap-1.5"><span className="font-bold flex-shrink-0">3.</span> In Chrome dialog → click <strong>"Chrome Tab"</strong></li>
+                <li className="flex gap-1.5"><span className="font-bold flex-shrink-0">3.</span> In Chrome dialog -> click <strong>"Chrome Tab"</strong></li>
                 <li className="flex gap-1.5"><span className="font-bold flex-shrink-0">4.</span> Select the tab you want (e.g. YouTube)</li>
                 <li className="flex gap-1.5"><span className="font-bold flex-shrink-0">5.</span> ✓ Check <strong>"Share tab audio"</strong></li>
                 <li className="flex gap-1.5"><span className="font-bold flex-shrink-0">6.</span> Click <strong>Share</strong></li>
@@ -225,7 +241,8 @@ const AppPage = () => {
   const [isUploading, setIsUploading] = useState(false);
   const [folders, setFolders] = useState([]);
   const [activeFolder, setActiveFolder] = useState('root');
-  const [liveExtensionRecording, setLiveExtensionRecording] = useState(null); // { startTime, tabCount, title }
+  const [liveExtensionRecording, setLiveExtensionRecording] = useState(null);
+  const [liveElapsed, setLiveElapsed] = useState(0);
   const [showNewFolder, setShowNewFolder] = useState(false);
   const [newFolderName, setNewFolderName] = useState('');
   const [editingFolderId, setEditingFolderId] = useState(null);
@@ -234,6 +251,24 @@ const AppPage = () => {
   const [renameRecordingTitle, setRenameRecordingTitle] = useState('');
   const [contextMenu, setContextMenu] = useState(null);
   const fileInputRef = useRef(null);
+
+  // New state for fixed UI elements
+  const [showSettings, setShowSettings] = useState(false);
+  const [showUrlImport, setShowUrlImport] = useState(false);
+  const [urlImportValue, setUrlImportValue] = useState('');
+  const [showShareModal, setShowShareModal] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [currentTime, setCurrentTime] = useState('');
+  const [toast, setToast] = useState(null);
+  const [showAbout, setShowAbout] = useState(false);
+
+  // Audio player state
+  const audioElRef = useRef(null);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [playbackPosition, setPlaybackPosition] = useState(0);
+  const [duration, setDuration] = useState(0);
+  const [volume, setVolume] = useState(1);
+  const [playbackSpeed, setPlaybackSpeed] = useState(1);
 
   // Recording refs
   const mediaRecorderRef = useRef(null);
@@ -244,16 +279,159 @@ const AppPage = () => {
   const animFrameRef = useRef(null);
   const timerRef = useRef(0);
 
+  // ── Auth state ──────────────────────────────────────────────────────────────
+  const [currentUser, setCurrentUser] = useState(getCurrentUser);
+  const [authMode, setAuthMode] = useState('login'); // 'login' | 'register'
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [authName, setAuthName] = useState('');
+  const [authLoading, setAuthLoading] = useState(false);
+  const [authError, setAuthError] = useState('');
+
+  const handleAuth = async (e) => {
+    e.preventDefault();
+    setAuthError('');
+    setAuthLoading(true);
+    try {
+      const user = authMode === 'login'
+        ? await loginUser(authEmail, authPassword)
+        : await registerUser(authEmail, authPassword, authName);
+      setCurrentUser(user);
+      showToast(`Welcome${user.name ? ', ' + user.name : '!'} `);
+    } catch (err) {
+      setAuthError(err?.response?.data?.detail || 'Something went wrong. Please try again.');
+    } finally {
+      setAuthLoading(false);
+    }
+  };
+
+  const handleLogout = () => {
+    logoutUser();
+    setCurrentUser(null);
+    showToast('Logged out');
+  };
+
+  // ── Login / Register Modal ─────────────────────────────────────────────────
+  const AuthModal = () => (
+    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 backdrop-blur-sm">
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md mx-4 overflow-hidden">
+        <div className="p-8">
+          <div className="flex items-center gap-3 mb-8">
+            <div className="w-10 h-10 rounded-xl flex items-center justify-center" style={{ background: BRAND_BLUE }}>
+              <AudioWaveform className="w-5 h-5 text-white" />
+            </div>
+            <div>
+              <h2 className="text-xl font-bold text-gray-900">
+                {authMode === 'login' ? 'Welcome back' : 'Create account'}
+              </h2>
+              <p className="text-sm text-gray-400">
+                {authMode === 'login' ? 'Sign in to your ScreenApp account' : 'Start recording with ScreenApp'}
+              </p>
+            </div>
+          </div>
+
+          {authError && (
+            <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-xl text-sm text-red-600">
+              {authError}
+            </div>
+          )}
+
+          <form onSubmit={handleAuth} className="space-y-4">
+            {authMode === 'register' && (
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1.5">Full Name</label>
+                <div className="relative">
+                  <User className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+                  <input
+                    type="text" value={authName} onChange={e => setAuthName(e.target.value)} required
+                    placeholder="Rahul Sharma"
+                    className="w-full pl-10 pr-4 py-2.5 border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  />
+                </div>
+              </div>
+            )}
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1.5">Email</label>
+              <div className="relative">
+                <Mail className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+                <input
+                  type="email" value={authEmail} onChange={e => setAuthEmail(e.target.value)} required
+                  placeholder="you@example.com"
+                  className="w-full pl-10 pr-4 py-2.5 border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                />
+              </div>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1.5">Password</label>
+              <div className="relative">
+                <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+                <input
+                  type="password" value={authPassword} onChange={e => setAuthPassword(e.target.value)} required
+                  placeholder="Min. 8 characters"
+                  className="w-full pl-10 pr-4 py-2.5 border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                />
+              </div>
+            </div>
+            <button
+              type="submit" disabled={authLoading}
+              className="w-full py-3 rounded-xl text-sm font-semibold text-white transition-opacity hover:opacity-90 disabled:opacity-50"
+              style={{ background: BRAND_BLUE }}
+            >
+              {authLoading ? 'Please wait...' : authMode === 'login' ? 'Sign In' : 'Create Account'}
+            </button>
+          </form>
+
+          <p className="mt-6 text-center text-sm text-gray-500">
+            {authMode === 'login' ? "Don't have an account? " : "Already have an account? "}
+            <button
+              onClick={() => { setAuthMode(authMode === 'login' ? 'register' : 'login'); setAuthError(''); }}
+              className="font-semibold hover:underline" style={{ color: BRAND_BLUE }}
+            >
+              {authMode === 'login' ? 'Sign up free' : 'Sign in'}
+            </button>
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+
+  // Show login if not authenticated
+  if (!currentUser) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gray-50">
+        <AuthModal />
+      </div>
+    );
+  }
+
+  // Show toast helper
+  const showToast = (message) => {
+    setToast(message);
+    setTimeout(() => setToast(null), 3500);
+  };
+
+  // Clock: update every second
+  useEffect(() => {
+    const updateClock = () => {
+      const now = new Date();
+      setCurrentTime(now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }));
+    };
+    updateClock();
+    const id = setInterval(updateClock, 1000);
+    return () => clearInterval(id);
+  }, []);
+
   // Load recordings when folder changes
   useEffect(() => {
     const loadRecordings = async () => {
       setIsLoadingRecordings(true);
       try {
+        const apiBase = API_BASE;
         const url = activeFolder === 'root'
-          ? 'http://localhost:8000/api/recordings?folder_id='
+          ? `${apiBase}/recordings?folder_id=`
           : activeFolder === 'all'
-          ? 'http://localhost:8000/api/recordings?folder_id=all'
-          : `http://localhost:8000/api/recordings?folder_id=${activeFolder}`;
+          ? `${apiBase}/recordings?folder_id=all`
+          : `${apiBase}/recordings?folder_id=${activeFolder}`;
         const response = await fetch(url);
         const data = await response.json();
         const list = Array.isArray(data) ? data : [];
@@ -268,38 +446,101 @@ const AppPage = () => {
     loadRecordings();
   }, [activeFolder]);
 
-  // Auto-refresh recordings + live recording state every 10 seconds
+  // fetchRecordingsList — reloads the recordings list from the API.
+  // Used both for periodic refresh and for immediate refresh after a recording stops.
+  const fetchRecordingsList = async () => {
+    try {
+      const url = activeFolder === 'root'
+        ? `${API_BASE}/recordings?folder_id=`
+        : activeFolder === 'all'
+        ? `${API_BASE}/recordings?folder_id=all`
+        : `${API_BASE}/recordings?folder_id=${activeFolder}`;
+      const response = await fetch(url);
+      if (!response.ok) return;
+      const data = await response.json();
+      const list = Array.isArray(data) ? data : [];
+      setRecordings(list.map(r => ({ ...r, id: r.id || r._id })));
+    } catch (err) {
+      console.error('fetchRecordingsList failed:', err);
+    }
+  };
+
+  // Dedicated live-state polling — always active, independent of recordings state
   useEffect(() => {
-    const interval = setInterval(async () => {
-      if (view !== 'dashboard') return;
+    const pollLive = async () => {
       try {
-        const [liveRes, recRes] = await Promise.all([
-          fetch('http://localhost:8000/api/recordings/live-state'),
-          fetch('http://localhost:8000/api/recordings?folder_id=')
-        ]);
-        // Update live recording status
-        if (liveRes.ok) {
-          const liveData = await liveRes.json();
-          const live = liveData && liveData.recording ? liveData : null;
-          setLiveExtensionRecording(prev => {
-            if (live && !prev) return { startTime: live.start_time, tabCount: live.tab_count, title: live.title };
-            if (!live && prev) return null;
-            return prev; // keep existing state, timer will re-render automatically
+        const res = await fetch(`${API_BASE}/recordings/live-state`);
+        if (!res.ok) return;
+        const data = await res.json();
+        if (data && data.recording && typeof data.recording === 'object') {
+          setLiveExtensionRecording({
+            startTime: data.recording.start_time,
+            tabCount: data.recording.tab_count,
+            title: data.recording.title,
+            updatedAt: Date.now()
           });
+        } else {
+          // Recording stopped — clear the live panel AND refresh recordings list
+          if (liveExtensionRecording) {
+            // There was a recording, now it's gone — fetch fresh recordings
+            fetchRecordingsList();
+          }
+          setLiveExtensionRecording(null);
+          setLiveElapsed(0);
         }
-        // Update recordings list
-        if (recRes.ok) {
-          const data = await recRes.json();
-          const list = Array.isArray(data) ? data : [];
-          const fresh = list.map(r => ({ ...r, id: r.id || r._id }));
-          const existingIds = new Set(recordings.map(r => r.id));
-          const newOnes = fresh.filter(r => !existingIds.has(r.id));
-          if (newOnes.length > 0) setRecordings(fresh);
-        }
-      } catch (err) { /* silent */ }
-    }, 10000);
+      } catch (e) {
+        console.warn('Live state poll failed:', e);
+      }
+    };
+
+    pollLive(); // run immediately on mount
+    const interval = setInterval(pollLive, 5000);
     return () => clearInterval(interval);
-  }, [view, recordings]);
+  }, [liveExtensionRecording]); // re-create interval when live state changes so we capture the prior value
+
+  // Auto-refresh recordings list every 10 seconds
+  useEffect(() => {
+    let cancelled = false;
+    const loadRecordings = async () => {
+      try {
+        const url = activeFolder === 'root'
+          ? `${API_BASE}/recordings?folder_id=`
+          : activeFolder === 'all'
+          ? `${API_BASE}/recordings?folder_id=all`
+          : `${API_BASE}/recordings?folder_id=${activeFolder}`;
+        const response = await fetch(url);
+        if (cancelled) return;
+        const data = await response.json();
+        if (cancelled) return;
+        const list = Array.isArray(data) ? data : [];
+        const fresh = list.map(r => ({ ...r, id: r.id || r._id }));
+        setRecordings(prev => {
+          if (prev.length === 0) return fresh; // initial load — replace
+          const existingIds = new Set(prev.map(r => r.id));
+          const newOnes = fresh.filter(r => !existingIds.has(r.id));
+          return newOnes.length > 0 ? [...newOnes, ...prev] : prev;
+        });
+      } catch (err) { /* silent */ } finally {
+        if (!cancelled) setIsLoadingRecordings(false);
+      }
+    };
+
+    setIsLoadingRecordings(true);
+    loadRecordings();
+    const interval = setInterval(loadRecordings, 10000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [activeFolder]);
+
+  // Live recording elapsed timer — updates every second, re-fires when polling updates state
+  useEffect(() => {
+    if (!liveExtensionRecording?.startTime) return;
+    const tick = () => {
+      setLiveElapsed(Math.floor((Date.now() - liveExtensionRecording.startTime) / 1000));
+    };
+    tick();
+    const id = setInterval(tick, 1000);
+    return () => clearInterval(id);
+  }, [liveExtensionRecording?.startTime, liveExtensionRecording?.updatedAt]);
 
   useEffect(() => {
     const loadFolders = async () => {
@@ -371,7 +612,7 @@ const AppPage = () => {
 
         setRecordings(prev => [{
           id: `uploading_${Date.now()}`,
-          title: `Recording – ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`,
+          title: `Recording - ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`,
           date: 'Just now', duration: formatTime(timerRef.current), speakers: ['You'], audioUrl: URL.createObjectURL(blob), isUploading: true
         }, ...prev]);
 
@@ -428,9 +669,31 @@ const AppPage = () => {
     setRecordingTime(0); timerRef.current = 0; setLiveWaveform(null);
   };
 
+  const stopLiveExtensionRecording = async () => {
+    const extId = localStorage.getItem('screenapp_extension_id') || '';
+    if (extId && window.chrome?.runtime?.sendMessage) {
+      try { await window.chrome.runtime.sendMessage(extId, { type: 'STOP_RECORDING' }); } catch (e) { /* extension may not be available */ }
+    }
+    try { await fetch(`${API_BASE}/recordings/live-state`, { method: 'DELETE' }); } catch (e) { /* silent */ }
+    setLiveExtensionRecording(null);
+    setLiveElapsed(0);
+    // Refresh the recordings list immediately so the new recording appears on the dashboard
+    await fetchRecordingsList();
+  };
+
+  // Sync duration from recording object when available (server-side duration)
+  useEffect(() => {
+    if (selectedRecording?.duration && !duration) {
+      setDuration(selectedRecording.duration);
+    }
+  }, [selectedRecording?.duration]);
+
   const openRecording = async (rec) => {
     const recId = rec.id || rec._id;
-    const audioUrl = rec.audioUrl || `http://localhost:8000/api/recordings/${recId}/audio`;
+    setDuration(NaN);
+    setPlaybackPosition(0);
+    setIsPlaying(false);
+    const audioUrl = rec.audioUrl || `${API_BASE}/recordings/${recId}/audio`;
     setSelectedRecording({ ...rec, audioUrl });
     setView('viewer');
     setActiveTab('transcript');
@@ -448,8 +711,10 @@ const AppPage = () => {
       setIsTranscribing(true);
       try {
         const data = await apiTranscribeRecording(recId);
-        setSelectedRecording(prev => prev ? { ...prev, transcript: data.transcript || data, isTranscribed: true } : prev);
-        setRecordings(prev => prev.map(r => (r.id === recId || r._id === recId) ? { ...r, transcript: data.transcript || data } : r));
+        const newTranscript = data.transcript || data;
+        setSelectedRecording(prev => prev ? { ...prev, transcript: newTranscript, segments: data.segments || [], isTranscribed: true } : prev);
+        setRecordings(prev => prev.map(r => (r.id === recId || r._id === recId) ? { ...r, transcript: newTranscript, segments: data.segments || [], status: 'transcribed' } : r));
+        try { await updateRecordingStatus(recId, 'transcribed'); } catch (e) { /* silent */ }
       } catch (err) {
         console.error('Transcription failed:', err);
         alert('Transcription failed. Please check that the backend is running and try again.');
@@ -463,8 +728,10 @@ const AppPage = () => {
       setIsSummarizing(true);
       try {
         const data = await apiSummarizeRecording(recId);
-        setSelectedRecording(prev => prev ? { ...prev, summary: data.summary || data, isSummarized: true } : prev);
-        setRecordings(prev => prev.map(r => (r.id === recId || r._id === recId) ? { ...r, summary: data.summary || data } : r));
+        const newSummary = data.summary || data;
+        setSelectedRecording(prev => prev ? { ...prev, summary: newSummary, isSummarized: true } : prev);
+        setRecordings(prev => prev.map(r => (r.id === recId || r._id === recId) ? { ...r, summary: newSummary, status: 'summarized' } : r));
+        try { await updateRecordingStatus(recId, 'summarized'); } catch (e) { /* silent */ }
       } catch (err) {
         console.error('Summarization failed:', err);
         alert('Summarization failed. Please check that the backend is running and try again.');
@@ -477,7 +744,6 @@ const AppPage = () => {
   const sendChat = async () => {
     const chatRecId = selectedRecording?.id || selectedRecording?._id;
     if (!chatInput.trim() || !chatRecId || String(chatRecId).startsWith('local_')) {
-      // Fallback for local recordings that haven't been uploaded
       if (!chatInput.trim()) return;
       const msg = chatInput.trim();
       setChatInput('');
@@ -513,7 +779,7 @@ const AppPage = () => {
       const data = await apiUploadRecording(blob, filename, duration, source);
       const newRecording = {
         id: data.id || `uploaded_${Date.now()}`,
-        title: `${source} – ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`,
+        title: `${source} - ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`,
         date: 'Just now',
         duration: formatTime(duration),
         speakers: ['You'],
@@ -522,11 +788,10 @@ const AppPage = () => {
       setRecordings(prev => [newRecording, ...prev]);
     } catch (err) {
       console.error('Upload failed:', err);
-      // Still add locally even if upload fails
       const url = URL.createObjectURL(blob);
       setRecordings(prev => [{
         id: `local_${Date.now()}`,
-        title: `${source} – ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`,
+        title: `${source} - ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`,
         date: 'Just now', duration: formatTime(duration), speakers: ['You'], audioUrl: url
       }, ...prev]);
       alert('Upload to server failed. Recording saved locally instead.');
@@ -572,9 +837,9 @@ const AppPage = () => {
     setRenameRecordingId(null);
   };
 
-const deleteRecording = async (recordingId) => {
+  const deleteRecording = async (recordingId) => {
     try {
-      await fetch(`http://localhost:8000/api/recordings/${recordingId}`, { method: 'DELETE' });
+      await fetch(`${API_BASE}/recordings/${recordingId}`, { method: 'DELETE' });
       setRecordings(prev => prev.filter(r => r.id !== recordingId));
       if (selectedRecording?.id === recordingId) { setSelectedRecording(null); setView('dashboard'); }
     } catch (err) { console.error('Delete failed:', err); alert('Delete failed. Please try again.'); }
@@ -597,7 +862,7 @@ const deleteRecording = async (recordingId) => {
 
   const handleDownloadAudio = async (rec) => {
     const recId = rec.id || rec._id;
-    const url = rec.audioUrl || `http://localhost:8000/api/recordings/${recId}/audio`;
+    const url = rec.audioUrl || `${API_BASE}/recordings/${recId}/audio`;
     try {
       const response = await fetch(url);
       const blob = await response.blob();
@@ -612,6 +877,42 @@ const deleteRecording = async (recordingId) => {
       console.error('Download failed:', err);
       alert('Download failed. Please try again.');
     }
+  };
+
+  // Status badge for recording cards
+  const getStatusBadge = (recording) => {
+    if (recording.status === 'processing') {
+      return <span className="text-xs font-medium px-2 py-0.5 rounded-full bg-amber-100 text-amber-700">Processing</span>;
+    }
+    if (recording.transcription && recording.summary) {
+      return <span className="text-xs font-medium px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700">Complete</span>;
+    }
+    if (recording.transcription) {
+      return <span className="text-xs font-medium px-2 py-0.5 rounded-full bg-blue-100 text-blue-700">Transcribed</span>;
+    }
+    if (recording.status === 'transcribed') {
+      return <span className="text-xs font-medium px-2 py-0.5 rounded-full bg-blue-100 text-blue-700">Transcribed</span>;
+    }
+    if (recording.status === 'summarized') {
+      return <span className="text-xs font-medium px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700">Complete</span>;
+    }
+    if (recording.status === 'new') {
+      return <span className="text-xs font-medium px-2 py-0.5 rounded-full bg-gray-100 text-gray-500">Pending</span>;
+    }
+    return <span className="text-xs font-medium px-2 py-0.5 rounded-full bg-gray-100 text-gray-500">Pending</span>;
+  };
+
+  // Search filter
+  const filteredRecordings = searchQuery.trim()
+    ? recordings.filter(r => r.title && r.title.toLowerCase().includes(searchQuery.toLowerCase()))
+    : recordings;
+
+  // Close URL import modal
+  const handleUrlImport = () => {
+    if (!urlImportValue.trim()) return;
+    setUrlImportValue('');
+    setShowUrlImport(false);
+    showToast('URL import coming soon');
   };
 
   return (
@@ -630,11 +931,19 @@ const deleteRecording = async (recordingId) => {
           <button onClick={startRealRecording} className="flex items-center gap-2 w-full text-white text-sm font-semibold py-2.5 px-3 rounded-xl hover:opacity-90 transition-opacity duration-150 mb-4" style={{ background: BRAND_BLUE }}>
             <Plus className="w-4 h-4" /> New Recording
           </button>
-          {[{ Icon: Home, label: 'Home' }].map(({ Icon, label }) => (
-            <button key={label} onClick={() => setView('dashboard')} className="flex items-center gap-2.5 w-full text-sm py-2 px-3 rounded-lg mb-1 text-gray-400 hover:text-white hover:bg-gray-800/50 transition-colors duration-150">
-              <Icon className="w-4 h-4" /> {label}
-            </button>
-          ))}
+
+          {/* Home button - always navigates to dashboard, highlighted when on dashboard */}
+          <button
+            onClick={() => setView('dashboard')}
+            className={`flex items-center gap-2.5 w-full text-sm py-2 px-3 rounded-lg mb-1 transition-colors duration-150 ${
+              view === 'dashboard'
+                ? 'bg-gray-800 text-white'
+                : 'text-gray-400 hover:text-white hover:bg-gray-800/50'
+            }`}
+          >
+            <Home className="w-4 h-4" /> Home
+          </button>
+
           <div className="mt-3">
             <div className="flex items-center justify-between px-3 mb-1">
               <span className="text-xs font-semibold text-gray-500 uppercase">Folders</span>
@@ -674,6 +983,8 @@ const deleteRecording = async (recordingId) => {
             <p className="text-xs font-semibold text-gray-500 uppercase px-3 mb-2 tracking-wider">Recent</p>
             {isLoadingRecordings ? (
               <p className="text-xs text-gray-500 px-3 py-2">Loading...</p>
+            ) : recordings.length === 0 ? (
+              <p className="text-xs text-gray-500 px-3 py-2">No recordings</p>
             ) : (
               recordings.slice(0, 6).map(rec => (
                 <button key={rec.id} onClick={() => openRecording(rec)} className={`flex items-center gap-2 w-full text-xs py-1.5 px-3 rounded-lg mb-0.5 text-left transition-colors duration-150 ${selectedRecording?.id === rec.id && view === 'viewer' ? 'bg-gray-800 text-white' : 'text-gray-400 hover:text-white hover:bg-gray-800/50'}`}>
@@ -689,7 +1000,10 @@ const deleteRecording = async (recordingId) => {
             <svg width="14" height="14" viewBox="0 0 100 100" fill="none"><circle cx="50" cy="50" r="40" stroke="currentColor" strokeWidth="8"/><circle cx="50" cy="50" r="16" fill="currentColor"/><path d="M50 10v40M84 67L50 50M16 67L50 50" stroke="white" strokeWidth="7"/></svg>
             Chrome Extension
           </button>
-          <button className="flex items-center gap-2.5 w-full text-sm text-gray-400 hover:text-white py-2 px-3 rounded-lg transition-colors duration-150">
+          <button onClick={() => setShowAbout(true)} className="flex items-center gap-2.5 w-full text-sm text-gray-400 hover:text-white py-2 px-3 rounded-lg transition-colors duration-150">
+            <Info className="w-4 h-4" /> About
+          </button>
+          <button onClick={() => setShowSettings(true)} className="flex items-center gap-2.5 w-full text-sm text-gray-400 hover:text-white py-2 px-3 rounded-lg transition-colors duration-150">
             <Settings className="w-4 h-4" /> Settings
           </button>
         </div>
@@ -701,12 +1015,18 @@ const deleteRecording = async (recordingId) => {
         <div className="bg-white border-b border-gray-200 px-5 py-3 flex items-center gap-4">
           <div className="flex-1 flex items-center gap-2 bg-gray-50 border border-gray-200 rounded-xl px-3 py-2 max-w-md">
             <Search className="w-4 h-4 text-gray-400 flex-shrink-0" />
-            <input className="text-sm bg-transparent outline-none text-gray-700 placeholder-gray-400 w-full" placeholder="How can I help?" />
+            <input
+              className="text-sm bg-transparent outline-none text-gray-700 placeholder-gray-400 w-full"
+              placeholder="Search recordings..."
+              value={searchQuery}
+              onChange={e => setSearchQuery(e.target.value)}
+            />
           </div>
           <div className="flex items-center gap-2 ml-auto">
-            <button className="w-8 h-8 rounded-full bg-gray-100 flex items-center justify-center text-gray-500 hover:bg-gray-200 transition-colors duration-150">
-              <Clock className="w-4 h-4" />
-            </button>
+            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-gray-100 text-xs font-medium text-gray-600">
+              <Clock className="w-3.5 h-3.5" />
+              <span>{currentTime}</span>
+            </div>
             <div className="w-8 h-8 rounded-full flex items-center justify-center text-white text-xs font-bold" style={{ background: BRAND_BLUE }}>U</div>
           </div>
         </div>
@@ -715,64 +1035,105 @@ const deleteRecording = async (recordingId) => {
         {view === 'dashboard' && (
           <div className="flex-1 overflow-y-auto p-6">
             <div className="max-w-3xl">
-              {/* Live Extension Recording Panel */}
-              {liveExtensionRecording && (
-                <div className="mb-6 bg-red-50 border border-red-200 rounded-2xl p-4">
-                  <div className="flex items-center gap-3 mb-3">
-                    <div className="w-3 h-3 rounded-full bg-red-500 animate-pulse flex-shrink-0" />
-                    <span className="text-sm font-bold text-red-700">Recording in Progress</span>
-                    <span className="text-xs text-red-500 ml-auto">
-                      {(() => {
-                        const elapsed = Math.floor((Date.now() - liveExtensionRecording.startTime) / 1000);
-                        const m = String(Math.floor(elapsed / 60)).padStart(2, '0');
-                        const s = String(elapsed % 60).padStart(2, '0');
-                        return `${m}:${s}`;
-                      })()}
+              {/* Live Extension Recording Panel — always visible, reacts to live state */}
+              <div className={`mb-6 rounded-2xl p-5 border-2 transition-all duration-500 ${
+                liveExtensionRecording
+                  ? 'bg-gradient-to-r from-red-50 to-amber-50 border-red-300 shadow-lg shadow-red-100'
+                  : 'bg-gray-50 border-gray-200 shadow-sm'
+              }`}>
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-3">
+                    <div className={`w-3 h-3 rounded-full flex-shrink-0 ${liveExtensionRecording ? 'bg-red-500 animate-pulse' : 'bg-gray-300'}`} />
+                    <span className={`text-base font-bold ${liveExtensionRecording ? 'text-red-800' : 'text-gray-400'}`}>
+                      {liveExtensionRecording ? 'Recording in Progress' : 'Live Recordings'}
                     </span>
                   </div>
-                  <p className="text-xs text-red-600 mb-3">
-                    {liveExtensionRecording.tabCount} tab(s) being recorded via Chrome Extension.
-                    Stop the recording in the extension popup to save and upload.
-                  </p>
-                  <div className="flex gap-2">
-                    <button
-                      onClick={() => setShowExtension(true)}
-                      className="text-xs font-medium px-3 py-1.5 rounded-full bg-red-100 text-red-700 hover:bg-red-200 transition-colors"
-                    >
-                      Open Extension to Stop
-                    </button>
-                    <span className="text-xs text-red-400 self-center">
-                      Live panel appears when extension is actively recording
+                  <div className={`flex items-center gap-2 px-3 py-1 rounded-full ${liveExtensionRecording ? 'bg-red-100' : 'bg-gray-100'}`}>
+                    <span className={`text-sm font-mono font-bold ${liveExtensionRecording ? 'text-red-700' : 'text-gray-400'}`}>
+                      {formatTime(liveElapsed)}
                     </span>
                   </div>
                 </div>
-              )}
+
+                {liveExtensionRecording ? (
+                  <>
+                    {liveExtensionRecording.title && (
+                      <p className="text-sm text-red-700 font-medium mb-1 flex items-center gap-2">
+                        <span className="w-5 h-5 rounded bg-red-200 text-red-600 flex items-center justify-center text-xs font-bold">
+                          {liveExtensionRecording.tabCount}
+                        </span>
+                        {liveExtensionRecording.title}
+                      </p>
+                    )}
+                    <div className="flex gap-1 items-center mt-3 mb-4">
+                      {[...Array(16)].map((_, i) => (
+                        <div
+                          key={i}
+                          className="w-1.5 rounded-full animate-pulse bg-red-400"
+                          style={{
+                            height: `${Math.sin(i * 0.7 + Date.now() * 0.005) * 12 + 16}px`,
+                            animationDelay: `${i * 0.08}s`,
+                          }}
+                        />
+                      ))}
+                    </div>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-xs font-semibold px-2 py-1 rounded-full bg-red-200 text-red-800 border border-red-300">
+                        LIVE
+                      </span>
+                      <span className="text-xs text-red-600">
+                        Recording audio via Chrome Extension
+                      </span>
+                      <button
+                        onClick={stopLiveExtensionRecording}
+                        className="ml-auto text-xs font-medium px-3 py-1.5 rounded-full bg-gray-100 text-gray-600 hover:bg-gray-200 transition-colors"
+                      >
+                        Stop Recording
+                      </button>
+                    </div>
+                  </>
+                ) : (
+                  <p className="text-sm text-gray-400 flex items-center gap-2">
+                    <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></svg>
+                    No active recording — start one from the Chrome Extension
+                  </p>
+                )}
+              </div>
 
               <h1 className="text-2xl font-bold text-gray-900 mb-1">Welcome back!</h1>
               <p className="text-gray-500 text-sm mb-8">Start a new recording or continue where you left off.</p>
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-8">
-                {[
-                  { Icon: Mic, label: 'Record Audio', desc: 'Capture microphone audio', action: startRealRecording, primary: true },
-                  { Icon: Upload, label: 'Import File', desc: 'Upload audio or video', action: () => fileInputRef.current?.click(), primary: false },
-                  { Icon: Share2, label: 'Import URL', desc: 'From Zoom, Meet, YouTube', action: () => { const url = window.prompt('Enter URL to import:'); if (url && url.trim()) alert('URL import: ' + url.trim() + '\n\nFeature coming soon!'); }, primary: false },
-                ].map(({ Icon, label, desc, action, primary }) => (
-                  <button key={label} onClick={action} className={`flex flex-col items-start gap-3 p-5 rounded-2xl text-left hover:scale-105 transition-transform duration-150 ${primary ? 'text-white shadow-lg' : 'bg-white border border-gray-200 text-gray-900 hover:shadow-md'}`} style={primary ? { background: BRAND_BLUE } : {}}>
-                    <Icon className={`w-5 h-5 ${primary ? 'text-white' : 'text-gray-600'}`} />
-                    <div>
-                      <div className={`text-sm font-semibold ${primary ? 'text-white' : 'text-gray-900'}`}>{label}</div>
-                      <div className={`text-xs mt-0.5 ${primary ? 'text-white/70' : 'text-gray-400'}`}>{desc}</div>
-                    </div>
-                  </button>
-                ))}
-              </div>
+
+              {searchQuery.trim() && (
+                <div className="mb-4 px-3 py-2 bg-blue-50 border border-blue-100 rounded-xl text-sm text-blue-700 flex items-center gap-2">
+                  <Search className="w-4 h-4" />
+                  <span>Showing {filteredRecordings.length} result{filteredRecordings.length !== 1 ? 's' : ''} for "<strong>{searchQuery}</strong>"</span>
+                  <button onClick={() => setSearchQuery('')} className="ml-auto text-blue-400 hover:text-blue-600"><X className="w-4 h-4" /></button>
+                </div>
+              )}
+
+              <button onClick={startRealRecording} className="flex flex-col items-start gap-3 p-5 rounded-2xl text-left hover:scale-105 transition-transform duration-150 text-white shadow-lg" style={{ background: BRAND_BLUE, maxWidth: 320 }}>
+                <Mic className="w-5 h-5 text-white" />
+                <div>
+                  <div className="text-sm font-semibold text-white">Record Audio</div>
+                  <div className="text-xs mt-0.5 text-white/70">Capture microphone audio</div>
+                </div>
+              </button>
               <h2 className="text-xs font-bold text-gray-500 uppercase tracking-widest mb-3">Recent Recordings</h2>
               <div className="space-y-2">
                 {isLoadingRecordings ? (
                   <div className="text-center py-8 text-sm text-gray-400">Loading recordings...</div>
-                ) : recordings.length === 0 ? (
-                  <div className="text-center py-8 text-sm text-gray-400">No recordings yet. Start by clicking "Record Audio" above.</div>
+                ) : filteredRecordings.length === 0 ? (
+                  searchQuery.trim() ? (
+                    <div className="text-center py-8">
+                      <Search className="w-8 h-8 text-gray-200 mx-auto mb-2" />
+                      <p className="text-sm text-gray-500">No recordings match "<strong>{searchQuery}</strong>"</p>
+                      <button onClick={() => setSearchQuery('')} className="text-xs text-blue-500 hover:underline mt-1">Clear search</button>
+                    </div>
+                  ) : (
+                    <div className="text-center py-8 text-sm text-gray-400">No recordings yet. Start by clicking "Record Audio" above.</div>
+                  )
                 ) : (
-                  recordings.map(rec => (
+                  filteredRecordings.map(rec => (
                     <button key={rec.id} onClick={() => openRecording(rec)} onContextMenu={(e) => { e.preventDefault(); setContextMenu({ rec, x: e.clientX, y: e.clientY }); }}
                       className="flex items-center gap-4 w-full bg-white border border-gray-100 rounded-xl p-4 hover:shadow-sm transition-shadow duration-150 text-left group">
                       <div className={`w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0 ${rec.audioUrl ? 'bg-emerald-50' : 'bg-blue-50'}`}>
@@ -788,6 +1149,7 @@ const deleteRecording = async (recordingId) => {
                             <span onDoubleClick={(e) => { e.stopPropagation(); setRenameRecordingId(rec.id); setRenameRecordingTitle(rec.title); }}>{rec.title}</span>
                           )}
                           {rec.audioUrl && <span className="text-xs bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded-full font-medium">Recorded</span>}
+                          {getStatusBadge(rec)}
                         </div>
                         <div className="text-xs text-gray-400 mt-0.5">{formatDateTime(rec.created_at)}{rec.size ? ` · ${formatBytes(rec.size)}` : ''}{rec.duration ? ` · ${formatTime(rec.duration)}` : rec._duration ? ` · ${formatTime(rec._duration)}` : ''}</div>
                       </div>
@@ -811,7 +1173,7 @@ const deleteRecording = async (recordingId) => {
               <div className="text-5xl font-mono font-bold text-gray-900 mb-6">{formatTime(recordingTime)}</div>
               <RecordingWaveform isActive={isRecording && !isPaused} liveHeights={liveWaveform} />
               <p className="text-sm text-gray-400 mt-4 mb-8">
-                {liveWaveform ? 'Live audio detected — AI transcribing in real-time' : 'Speak now — AI is listening and transcribing'}
+                {liveWaveform ? 'Live audio detected - AI transcribing in real-time' : 'Speak now - AI is listening and transcribing'}
               </p>
               <div className="flex items-center justify-center gap-4">
                 <button onClick={togglePause} className="w-12 h-12 rounded-full bg-gray-100 flex items-center justify-center text-gray-600 hover:bg-gray-200 transition-colors duration-150">
@@ -838,14 +1200,24 @@ const deleteRecording = async (recordingId) => {
                   <ArrowLeft className="w-4 h-4" />
                 </button>
                 <div className="flex-1 min-w-0">
-                  <h2 className="text-sm font-bold text-gray-900 truncate">{selectedRecording.title}</h2>
+                  <div className="flex items-center gap-2">
+                    <h2 className="text-sm font-bold text-gray-900 truncate">{selectedRecording.title}</h2>
+                    {selectedRecording.status && (
+                      <span className={`text-xs px-1.5 py-0.5 rounded-full font-medium flex-shrink-0 ${
+                        selectedRecording.status === 'new' ? 'bg-blue-100 text-blue-700' :
+                        selectedRecording.status === 'transcribed' || selectedRecording.status === 'processing' ? 'bg-violet-100 text-violet-700' :
+                        selectedRecording.status === 'summarized' ? 'bg-amber-100 text-amber-700' :
+                        'bg-gray-100 text-gray-600'
+                      }`}>{selectedRecording.status}</span>
+                    )}
+                  </div>
                   <p className="text-xs text-gray-400">{formatDateTime(selectedRecording.created_at)}{selectedRecording.size ? ` · ${formatBytes(selectedRecording.size)}` : ''}{selectedRecording.duration ? ` · ${formatTime(selectedRecording.duration)}` : ''}</p>
                 </div>
                 <div className="flex gap-1">
                   <button onClick={() => handleDownloadAudio(selectedRecording)} className="p-2 rounded-lg hover:bg-gray-100 text-gray-500 transition-colors duration-150" title="Download">
                     <Download className="w-4 h-4" />
                   </button>
-                  <button className="p-2 rounded-lg hover:bg-gray-100 text-gray-500 transition-colors duration-150" title="Share">
+                  <button onClick={() => setShowShareModal(true)} className="p-2 rounded-lg hover:bg-gray-100 text-gray-500 transition-colors duration-150" title="Share">
                     <Share2 className="w-4 h-4" />
                   </button>
                   <button className="p-2 rounded-lg hover:bg-gray-100 text-gray-500 transition-colors duration-150">
@@ -856,28 +1228,82 @@ const deleteRecording = async (recordingId) => {
               <div className="flex-1 flex flex-col p-5 overflow-auto bg-white">
                 {selectedRecording.audioUrl ? (
                   <div className="mb-5">
+                    <audio
+                      ref={audioElRef}
+                      preload="metadata"
+                      src={selectedRecording.audioUrl}
+                      onLoadedMetadata={() => { if (audioElRef.current && Number.isFinite(audioElRef.current.duration)) { audioElRef.current.currentTime = 0; setDuration(audioElRef.current.duration); } }}
+                      onTimeUpdate={() => { if (audioElRef.current && Number.isFinite(audioElRef.current.currentTime)) setPlaybackPosition(audioElRef.current.currentTime); }}
+                      onPlay={() => setIsPlaying(true)}
+                      onPause={() => setIsPlaying(false)}
+                      onEnded={() => { setIsPlaying(false); setPlaybackPosition(0); }}
+                      onVolumeChange={() => { if (audioElRef.current) setVolume(audioElRef.current.volume); }}
+                      className="hidden"
+                    />
                     <div className="bg-gray-50 border border-gray-200 rounded-2xl p-5">
-                      <div className="flex items-center gap-3 mb-3">
+                      <div className="flex items-center gap-3 mb-4">
                         <div className="w-8 h-8 rounded-full bg-emerald-100 flex items-center justify-center"><Mic className="w-4 h-4 text-emerald-600" /></div>
                         <div>
                           <div className="text-sm font-semibold text-gray-900">{selectedRecording.title}</div>
                           <div className="text-xs text-gray-400">{formatDateTime(selectedRecording.created_at)}{selectedRecording.size ? ` · ${formatBytes(selectedRecording.size)}` : ''}</div>
                         </div>
                       </div>
-                      <div className="bg-gray-50 border border-gray-200 rounded-2xl p-5">
-                        <div className="flex items-center gap-3 mb-3">
-                          <div className="w-8 h-8 rounded-full bg-emerald-100 flex items-center justify-center"><Mic className="w-4 h-4 text-emerald-600" /></div>
-                          <div>
-                            <div className="text-sm font-semibold text-gray-900">{selectedRecording.title}</div>
-                            <div className="text-xs text-gray-400">{formatDateTime(selectedRecording.created_at)}{selectedRecording.size ? ` · ${formatBytes(selectedRecording.size)}` : ''}{selectedRecording.duration ? ` · ${formatTime(selectedRecording.duration)}` : ''}</div>
+                      <div className="flex items-center gap-3">
+                        <button
+                          onClick={() => { if (!audioElRef.current) return; if (isPlaying) { audioElRef.current.pause(); } else { audioElRef.current.play(); } }}
+                          className="w-10 h-10 rounded-full flex items-center justify-center text-white flex-shrink-0 transition-opacity hover:opacity-85"
+                          style={{ background: BRAND_BLUE }}
+                        >
+                          {isPlaying
+                            ? <Pause className="w-4 h-4" />
+                            : <Play className="w-4 h-4 ml-0.5" />
+                          }
+                        </button>
+                        <div className="flex-1">
+                          <div
+                            className="w-full h-1.5 bg-gray-200 rounded-full cursor-pointer group"
+                            onClick={(e) => {
+                              if (!audioElRef.current || !duration || !Number.isFinite(duration)) return;
+                              const rect = e.currentTarget.getBoundingClientRect();
+                              const ratio = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+                              const newTime = ratio * duration;
+                              if (Number.isFinite(newTime)) audioElRef.current.currentTime = newTime;
+                            }}
+                          >
+                            <div
+                              className="h-1.5 rounded-full transition-all duration-100"
+                              style={{ width: `${duration ? (playbackPosition / duration) * 100 : 0}%`, background: BRAND_BLUE }}
+                            />
+                          </div>
+                          <div className="flex justify-between mt-1">
+                            <span className="text-xs text-gray-500 font-mono">{formatTime(playbackPosition)}</span>
+                            <span className="text-xs text-gray-400 font-mono">{duration ? formatTime(duration) : '--:--'}</span>
                           </div>
                         </div>
-                        <audio ref={el => {
-                          if (!el) return;
-                          el.onloadedmetadata = () => {
-                            el.currentTime = 0;
-                          };
-                        }} controls preload="metadata" src={selectedRecording.audioUrl} className="w-full rounded-lg" style={{ height: 40 }} />
+                        <Volume2 className="w-4 h-4 text-gray-400 flex-shrink-0" />
+                        <input
+                          type="range"
+                          min="0"
+                          max="1"
+                          step="0.01"
+                          value={volume}
+                          onChange={(e) => { if (audioElRef.current) { audioElRef.current.volume = parseFloat(e.target.value); setVolume(parseFloat(e.target.value)); } }}
+                          className="w-16 h-1 accent-blue-500"
+                          title={`Volume: ${Math.round(volume * 100)}%`}
+                        />
+                        <select
+                          value={playbackSpeed}
+                          onChange={(e) => { if (audioElRef.current) { audioElRef.current.playbackRate = parseFloat(e.target.value); setPlaybackSpeed(parseFloat(e.target.value)); } }}
+                          className="text-xs border border-gray-200 rounded-lg px-1.5 py-1 bg-white text-gray-600 cursor-pointer outline-none"
+                          title="Playback speed"
+                        >
+                          <option value="0.5">0.5x</option>
+                          <option value="0.75">0.75x</option>
+                          <option value="1">1x</option>
+                          <option value="1.25">1.25x</option>
+                          <option value="1.5">1.5x</option>
+                          <option value="2">2x</option>
+                        </select>
                       </div>
                     </div>
                   </div>
@@ -894,7 +1320,9 @@ const deleteRecording = async (recordingId) => {
                           ))}
                         </div>
                       </div>
-                      <span className="text-xs text-gray-400 font-mono whitespace-nowrap">2:34 / {selectedRecording.duration}</span>
+                      <span className="text-xs text-gray-400 font-mono whitespace-nowrap">
+                        {selectedRecording.duration ? `${formatTime(selectedRecording.duration)}` : '--:--'}
+                      </span>
                       <Volume2 className="w-4 h-4 text-gray-400" />
                     </div>
                     <div className="w-full bg-gray-700 rounded-full h-1"><div className="h-1 rounded-full" style={{ width: '20%', background: BRAND_BLUE }} /></div>
@@ -927,9 +1355,28 @@ const deleteRecording = async (recordingId) => {
                         <div className="w-8 h-8 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
                         <p className="text-sm text-gray-500 font-medium">Processing transcript...</p>
                       </div>
-                    ) : selectedRecording.transcript ? (
+                    ) : selectedRecording.transcript || selectedRecording.segments ? (
                       <div className="space-y-1">
                         {(() => {
+                          const segs = selectedRecording.segments;
+                          if (segs && Array.isArray(segs) && segs.length > 0) {
+                            return segs.map((seg, i) => (
+                              <div key={i} className="group cursor-pointer hover:bg-blue-50 rounded-lg p-1 -mx-1 transition-colors duration-150">
+                                <div className="flex items-center gap-1.5 mb-0.5">
+                                  <button
+                                    onClick={() => { if (audioElRef.current && Number.isFinite(seg.start)) audioElRef.current.currentTime = seg.start; }}
+                                    className="text-xs font-mono text-gray-400 hover:text-blue-500 w-10 flex-shrink-0 text-left transition-colors"
+                                  >{seg.time}</button>
+                                  <span className="text-xs text-gray-200">-</span>
+                                  <button
+                                    onClick={() => { if (audioElRef.current && seg.end != null && Number.isFinite(seg.end)) audioElRef.current.currentTime = seg.end; }}
+                                    className="text-xs font-mono text-gray-300 hover:text-blue-400 transition-colors"
+                                  >{seg.end != null ? formatTime(seg.end) : ''}</button>
+                                </div>
+                                <p className="text-sm text-gray-700 leading-relaxed pl-12">{seg.text}</p>
+                              </div>
+                            ));
+                          }
                           const t = selectedRecording.transcript;
                           if (typeof t === 'string') {
                             return <p className="text-sm text-gray-700 leading-relaxed whitespace-pre-wrap">{t}</p>;
@@ -988,38 +1435,180 @@ const deleteRecording = async (recordingId) => {
                     </div>
                   ) : selectedRecording.summary ? (
                     (() => {
-                      const summary = selectedRecording.summary;
-                      const keyPoints = summary.keyPoints || (Array.isArray(summary) ? summary.map(s => typeof s === 'string' ? s : s.point || s.text) : []);
-                      const actionItems = summary.actionItems || [];
-                      const decisions = summary.decisions || [];
+                      const s = selectedRecording.summary;
+                      const summaryIsString = typeof s === 'string';
+                      const keyPoints = summaryIsString ? [] : (s.keyPoints || []);
+                      const actionItems = summaryIsString ? [] : (s.actionItems || []);
+                      const roadmap = summaryIsString ? [] : (s.roadmap || []);
+                      const takeaways = summaryIsString ? [] : (s.takeaways || []);
+                      const tools = summaryIsString ? [] : (s.tools || []);
+                      const decisions = summaryIsString ? [] : (s.decisions || []);
+                      const sentiment = summaryIsString ? null : (s.sentiment || null);
+                      const nextMeetings = summaryIsString ? [] : (s.nextMeetings || []);
+
+                      const priorityStyles = {
+                        high: { dot: 'bg-red-500', badge: 'bg-red-100 text-red-700', label: 'High' },
+                        medium: { dot: 'bg-orange-500', badge: 'bg-orange-100 text-orange-700', label: 'Medium' },
+                        low: { dot: 'bg-gray-400', badge: 'bg-gray-100 text-gray-500', label: 'Low' },
+                      };
+                      const sentimentStyles = {
+                        positive: { color: 'text-emerald-600', bg: 'bg-emerald-50 border-emerald-200', icon: '✨' },
+                        neutral: { color: 'text-gray-600', bg: 'bg-gray-50 border-gray-200', icon: '📋' },
+                        negative: { color: 'text-red-600', bg: 'bg-red-50 border-red-200', icon: '⚠️' },
+                      };
+                      const st = sentiment && sentimentStyles[sentiment] || null;
+
+                      const exportSummary = () => {
+                        const lines = [`Summary — ${selectedRecording.title}`, `Generated: ${new Date().toLocaleString()}`, ''];
+                        if (st) lines.push(`Sentiment: ${sentiment}`);
+                        if (keyPoints.length) { lines.push('KEY POINTS'); keyPoints.forEach((p, i) => lines.push(`  ${i + 1}. ${typeof p === 'string' ? p : p.point || p.text || JSON.stringify(p)}`)); lines.push(''); }
+                        if (actionItems.length) { lines.push('ACTION ITEMS'); actionItems.forEach(a => lines.push(`  • [${(a.priority || 'medium').toUpperCase()}] ${typeof a === 'string' ? a : a.task || a.item || JSON.stringify(a)}${a.owner && a.owner !== 'Unassigned' ? ` (${a.owner})` : ''}${a.deadline ? ` — Due: ${a.deadline}` : ''}`)); lines.push(''); }
+                        if (roadmap.length) { lines.push('ROADMAP'); roadmap.forEach((r, i) => lines.push(`  ${i + 1}. ${typeof r === 'string' ? r : r.step || JSON.stringify(r)}`)); lines.push(''); }
+                        if (takeaways.length) { lines.push('TAKEAWAYS'); takeaways.forEach(t => lines.push(`  • ${typeof t === 'string' ? t : t.learning || JSON.stringify(t)}`)); lines.push(''); }
+                        if (tools.length) { lines.push('TOOLS & RESOURCES'); tools.forEach(t => lines.push(`  • ${typeof t === 'string' ? t : t.tool || JSON.stringify(t)}`)); lines.push(''); }
+                        if (decisions.length) { lines.push('DECISIONS'); decisions.forEach(d => lines.push(`  ✓ ${typeof d === 'string' ? d : d.decision || JSON.stringify(d)}`)); lines.push(''); }
+                        if (nextMeetings.length) { lines.push('NEXT MEETINGS'); nextMeetings.forEach(m => lines.push(`  → ${typeof m === 'string' ? m : m.topic || JSON.stringify(m)}${m.suggestedDate ? ` (${m.suggestedDate})` : ''}`)); lines.push(''); }
+                        if (summaryIsString) { lines.push('FULL TEXT'); lines.push(s); }
+                        const blob = new Blob([lines.join('\n')], { type: 'text/plain' });
+                        const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `${selectedRecording.title || 'summary'}_summary.txt`; a.click();
+                      };
+
                       return (
                         <>
+                          <div className="flex items-center justify-between mb-1">
+                            <h3 className="text-xs font-bold text-gray-500 uppercase tracking-wider">Summary</h3>
+                            <button onClick={exportSummary} className="text-xs text-blue-600 hover:text-blue-800 font-medium flex items-center gap-1">
+                              <Download className="w-3.5 h-3.5" /> Export
+                            </button>
+                          </div>
+
+                          {st && (
+                            <div className={`flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-medium border ${st.bg} ${st.color}`}>
+                              <span>{st.icon}</span>
+                              <span>Overall sentiment: <span className="font-semibold capitalize">{sentiment}</span></span>
+                            </div>
+                          )}
+
+                          {actionItems.length > 0 && (
+                            <div>
+                              <h3 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">Action Items</h3>
+                              {actionItems.map((item, i) => {
+                                const priority = (typeof item === 'object' ? item.priority : 'medium') || 'medium';
+                                const ps = priorityStyles[priority] || priorityStyles.medium;
+                                const task = typeof item === 'string' ? item : item.task || item.item || item.text || JSON.stringify(item);
+                                const owner = typeof item === 'object' ? item.owner : null;
+                                const deadline = typeof item === 'object' ? item.deadline : null;
+                                return (
+                                  <div key={i} className="flex gap-2.5 mb-2.5 p-2.5 bg-white rounded-xl border border-gray-100 hover:border-gray-200 transition-colors">
+                                    <div className={`w-2 h-2 rounded-full mt-1.5 flex-shrink-0 ${ps.dot}`} />
+                                    <div className="flex-1 min-w-0">
+                                      <p className="text-sm text-gray-800 leading-snug">{task}</p>
+                                      <div className="flex items-center gap-2 mt-1 flex-wrap">
+                                        {owner && owner !== 'Unassigned' && <span className="text-xs text-gray-500 font-medium">👤 {owner}</span>}
+                                        {deadline && <span className="text-xs text-gray-400">📅 {deadline}</span>}
+                                        <span className={`text-xs px-1.5 py-0.5 rounded-full font-medium ${ps.badge}`}>{ps.label}</span>
+                                      </div>
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          )}
+
+                          {roadmap.length > 0 && (
+                            <div>
+                              <h3 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">Roadmap</h3>
+                              <div className="space-y-1.5">
+                                {roadmap.map((step, i) => (
+                                  <div key={i} className="flex items-start gap-2.5 p-2 bg-violet-50 rounded-xl border border-violet-100">
+                                    <div className="w-5 h-5 rounded-full bg-violet-500 flex items-center justify-center flex-shrink-0">
+                                      <span className="text-white text-xs font-bold">{i + 1}</span>
+                                    </div>
+                                    <p className="text-sm text-violet-900 leading-snug pt-0.5">{typeof step === 'string' ? step : step.step || step.text || JSON.stringify(step)}</p>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+
                           {keyPoints.length > 0 && (
                             <div>
                               <h3 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">Key Points</h3>
                               {keyPoints.map((item, i) => (
-                                <div key={i} className="flex gap-2 mb-2"><div className="w-1.5 h-1.5 rounded-full bg-blue-500 mt-1.5 flex-shrink-0" /><p className="text-sm text-gray-700 leading-relaxed">{typeof item === 'string' ? item : item.point || item.text || JSON.stringify(item)}</p></div>
+                                <div key={i} className="flex gap-2.5 mb-2">
+                                  <div className="w-1.5 h-1.5 rounded-full bg-blue-500 mt-1.5 flex-shrink-0" />
+                                  <p className="text-sm text-gray-700 leading-relaxed">{typeof item === 'string' ? item : item.point || item.text || JSON.stringify(item)}</p>
+                                </div>
                               ))}
                             </div>
                           )}
-                          {actionItems.length > 0 && (
+
+                          {takeaways.length > 0 && (
                             <div>
-                              <h3 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">Action Items</h3>
-                              {actionItems.map((item, i) => (
-                                <div key={i} className="flex gap-2 mb-2"><div className="w-1.5 h-1.5 rounded-full bg-emerald-500 mt-1.5 flex-shrink-0" /><p className="text-sm text-gray-700 leading-relaxed">{typeof item === 'string' ? item : item.item || item.text || JSON.stringify(item)}</p></div>
+                              <h3 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">Key Takeaways</h3>
+                              {takeaways.map((item, i) => (
+                                <div key={i} className="flex gap-2.5 mb-2">
+                                  <span className="text-amber-400 flex-shrink-0 mt-0.5">★</span>
+                                  <p className="text-sm text-gray-700 leading-relaxed">{typeof item === 'string' ? item : item.learning || item.text || JSON.stringify(item)}</p>
+                                </div>
                               ))}
                             </div>
                           )}
+
+                          {tools.length > 0 && (
+                            <div>
+                              <h3 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">Tools &amp; Resources</h3>
+                              <div className="flex flex-wrap gap-1.5">
+                                {tools.map((tool, i) => (
+                                  <span key={i} className="inline-flex items-center gap-1 px-2.5 py-1 bg-gray-100 text-gray-700 text-xs rounded-full border border-gray-200 font-medium">
+                                    🔧 {typeof tool === 'string' ? tool : tool.tool || JSON.stringify(tool)}
+                                  </span>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+
                           {decisions.length > 0 && (
                             <div>
                               <h3 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">Decisions</h3>
                               {decisions.map((item, i) => (
-                                <div key={i} className="flex gap-2 mb-2"><div className="w-1.5 h-1.5 rounded-full bg-violet-500 mt-1.5 flex-shrink-0" /><p className="text-sm text-gray-700 leading-relaxed">{typeof item === 'string' ? item : item.decision || item.text || JSON.stringify(item)}</p></div>
+                                <div key={i} className="flex gap-2.5 mb-2 p-2.5 bg-emerald-50 rounded-xl border border-emerald-100">
+                                  <span className="text-emerald-500 flex-shrink-0 mt-0.5">✓</span>
+                                  <p className="text-sm text-emerald-800 leading-snug">{typeof item === 'string' ? item : item.decision || item.text || JSON.stringify(item)}</p>
+                                </div>
                               ))}
                             </div>
                           )}
-                          {keyPoints.length === 0 && actionItems.length === 0 && decisions.length === 0 && (
-                            <p className="text-sm text-gray-500">{typeof summary === 'string' ? summary : JSON.stringify(summary)}</p>
+
+                          {nextMeetings.length > 0 && (
+                            <div>
+                              <h3 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">Next Meetings</h3>
+                              {nextMeetings.map((m, i) => (
+                                <div key={i} className="flex gap-2.5 mb-2 p-2.5 bg-blue-50 rounded-xl border border-blue-100">
+                                  <span className="text-blue-500 flex-shrink-0 mt-0.5">→</span>
+                                  <div>
+                                    <p className="text-sm text-blue-900 leading-snug">{typeof m === 'string' ? m : m.topic || JSON.stringify(m)}</p>
+                                    {m.suggestedDate && <p className="text-xs text-blue-500 mt-0.5">📅 {m.suggestedDate}</p>}
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+
+                          {summaryIsString && (
+                            <div>
+                              <h3 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">Full Summary</h3>
+                              <p className="text-sm text-gray-700 leading-relaxed whitespace-pre-wrap">{s}</p>
+                            </div>
+                          )}
+
+                          {keyPoints.length === 0 && actionItems.length === 0 && roadmap.length === 0 &&
+                           takeaways.length === 0 && tools.length === 0 && decisions.length === 0 &&
+                           nextMeetings.length === 0 && !summaryIsString && (
+                            <div className="text-center py-8">
+                              <p className="text-sm text-gray-500">Could not parse structured summary.</p>
+                              <pre className="text-xs text-gray-400 mt-2 whitespace-pre-wrap text-left bg-gray-50 p-2 rounded">{JSON.stringify(s, null, 2)}</pre>
+                            </div>
                           )}
                         </>
                       );
@@ -1071,13 +1660,146 @@ const deleteRecording = async (recordingId) => {
 
       {showExtension && <ChromeExtModal onClose={() => setShowExtension(false)} onSave={handleExtSave} />}
 
+      {/* URL Import Modal */}
+      {showUrlImport && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => setShowUrlImport(false)}>
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md mx-4 overflow-hidden" onClick={e => e.stopPropagation()}>
+            <div className="p-4 flex items-center justify-between border-b border-gray-100">
+              <div className="flex items-center gap-2">
+                <div className="w-8 h-8 rounded-lg flex items-center justify-center bg-blue-50"><Globe className="w-4 h-4 text-blue-500" /></div>
+                <div>
+                  <h3 className="text-sm font-bold text-gray-900">Import from URL</h3>
+                  <p className="text-xs text-gray-400">Import from Zoom, Google Meet, YouTube, and more</p>
+                </div>
+              </div>
+              <button onClick={() => setShowUrlImport(false)} className="text-gray-400 hover:text-gray-600"><X className="w-4 h-4" /></button>
+            </div>
+            <div className="p-4">
+              <label className="text-xs font-medium text-gray-600 mb-1.5 block">Recording URL</label>
+              <input
+                autoFocus
+                type="url"
+                value={urlImportValue}
+                onChange={e => setUrlImportValue(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') handleUrlImport(); if (e.key === 'Escape') setShowUrlImport(false); }}
+                placeholder="https://zoom.us/j/..."
+                className="w-full text-sm border border-gray-200 rounded-xl px-3 py-2.5 outline-none focus:border-blue-400 transition-colors placeholder-gray-400 mb-3"
+              />
+              <div className="bg-amber-50 border border-amber-100 rounded-xl p-3 mb-4">
+                <div className="flex items-start gap-2">
+                  <Info className="w-4 h-4 text-amber-500 mt-0.5 flex-shrink-0" />
+                  <p className="text-xs text-amber-700">URL import is coming soon. We'll support Zoom, Google Meet, Microsoft Teams, and YouTube recordings.</p>
+                </div>
+              </div>
+              <button
+                onClick={handleUrlImport}
+                disabled={!urlImportValue.trim()}
+                className="w-full py-2.5 rounded-xl text-sm font-semibold text-white disabled:opacity-40 transition-opacity flex items-center justify-center gap-2"
+                style={{ background: BRAND_BLUE }}
+              >
+                <ExternalLink className="w-4 h-4" />
+                Import Recording
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Settings Modal */}
+      {showSettings && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => setShowSettings(false)}>
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md mx-4 overflow-hidden" onClick={e => e.stopPropagation()}>
+            <div className="p-4 flex items-center justify-between border-b border-gray-100">
+              <div className="flex items-center gap-2">
+                <div className="w-8 h-8 rounded-lg flex items-center justify-center bg-gray-100"><Settings className="w-4 h-4 text-gray-600" /></div>
+                <h3 className="text-sm font-bold text-gray-900">Settings</h3>
+              </div>
+              <button onClick={() => setShowSettings(false)} className="text-gray-400 hover:text-gray-600"><X className="w-4 h-4" /></button>
+            </div>
+            <div className="p-4">
+              <div className="bg-blue-50 border border-blue-100 rounded-xl p-4 text-center">
+                <Settings className="w-8 h-8 text-blue-300 mx-auto mb-2" />
+                <p className="text-sm font-semibold text-blue-700 mb-1">Full Settings Panel Coming Soon</p>
+                <p className="text-xs text-blue-600">Audio quality, transcription preferences, notifications, and account settings will be available here.</p>
+              </div>
+              <div className="mt-4 space-y-3">
+                <div className="flex items-center justify-between py-2 border-b border-gray-100">
+                  <span className="text-sm text-gray-600">Audio Quality</span>
+                  <span className="text-xs text-gray-400 bg-gray-100 px-2 py-1 rounded-full">High</span>
+                </div>
+                <div className="flex items-center justify-between py-2 border-b border-gray-100">
+                  <span className="text-sm text-gray-600">Auto-transcribe</span>
+                  <span className="text-xs text-gray-400 bg-gray-100 px-2 py-1 rounded-full">Enabled</span>
+                </div>
+                <div className="flex items-center justify-between py-2">
+                  <span className="text-sm text-gray-600">Dark Mode</span>
+                  <span className="text-xs text-gray-400 bg-gray-100 px-2 py-1 rounded-full">Light</span>
+                </div>
+              </div>
+            </div>
+            <div className="p-4 border-t border-gray-100">
+              <button onClick={() => setShowSettings(false)} className="w-full py-2.5 rounded-xl text-sm font-semibold text-gray-600 border border-gray-200 hover:bg-gray-50 transition-colors">
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* About Modal */}
+      {showAbout && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => setShowAbout(false)}>
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm mx-4 overflow-hidden" onClick={e => e.stopPropagation()}>
+            <div className="p-6 text-center">
+              <div className="w-14 h-14 rounded-2xl flex items-center justify-center mx-auto mb-3" style={{ background: BRAND_BLUE }}>
+                <AudioWaveform className="w-7 h-7 text-white" />
+              </div>
+              <h3 className="text-lg font-bold text-gray-900 mb-1">ScreenApp</h3>
+              <p className="text-xs text-gray-400 mb-4">Version 1.0.0</p>
+              <p className="text-sm text-gray-600 mb-4">AI-powered audio recording, transcription, and summarization for professionals.</p>
+              <div className="flex items-center justify-center gap-1 text-xs text-gray-400">
+                <span>Built with</span>
+                <span className="text-blue-500 font-medium">React</span>
+                <span>+</span>
+                <span className="text-blue-500 font-medium">Tailwind</span>
+              </div>
+            </div>
+            <div className="p-4 border-t border-gray-100">
+              <button onClick={() => setShowAbout(false)} className="w-full py-2.5 rounded-xl text-sm font-semibold text-gray-600 border border-gray-200 hover:bg-gray-50 transition-colors">
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Share Modal */}
+      {showShareModal && selectedRecording && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => setShowShareModal(false)}>
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md mx-4 overflow-hidden" onClick={e => e.stopPropagation()}>
+            <div className="p-4 flex items-center justify-between border-b border-gray-100">
+              <div className="flex items-center gap-2">
+                <div className="w-8 h-8 rounded-lg flex items-center justify-center bg-blue-50"><Share2 className="w-4 h-4 text-blue-500" /></div>
+                <h3 className="text-sm font-bold text-gray-900">Share Recording</h3>
+              </div>
+              <button onClick={() => setShowShareModal(false)} className="text-gray-400 hover:text-gray-600"><X className="w-4 h-4" /></button>
+            </div>
+            <div className="p-4">
+              <p className="text-xs text-gray-500 mb-3">Share options coming soon. You can currently download the audio file and share it manually.</p>
+              <button
+                onClick={() => { handleDownloadAudio(selectedRecording); setShowShareModal(false); showToast('Recording downloaded'); }}
+                className="w-full py-2.5 rounded-xl text-sm font-semibold text-white flex items-center justify-center gap-2 hover:opacity-90 transition-opacity"
+                style={{ background: BRAND_BLUE }}
+              >
+                <Download className="w-4 h-4" /> Download & Share
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <input ref={fileInputRef} type="file" accept="audio/*,video/*" className="hidden"
-        onChange={async (e) => {
-          const file = e.target.files?.[0];
-          if (!file) return;
-          alert('File import: ' + file.name + '\n\nFeature coming soon!');
-          e.target.value = '';
-        }} />
+        onChange={(e) => { e.preventDefault(); showToast('File import — coming soon'); if (e.target) e.target.value = ''; }} />
 
       {contextMenu && (
         <div className="fixed z-50 bg-white rounded-xl shadow-xl border border-gray-200 py-1 w-48 text-sm"
@@ -1111,6 +1833,9 @@ const deleteRecording = async (recordingId) => {
           </div>
         </div>
       )}
+
+      {/* Toast notification */}
+      {toast && <Toast message={toast} onClose={() => setToast(null)} />}
     </div>
   );
 };

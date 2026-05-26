@@ -10,6 +10,43 @@ const api = axios.create({
   timeout: 60000,
 });
 
+// ── Auth helpers ────────────────────────────────────────────────────────────────
+export const loginUser = async (email, password) => {
+  const { data } = await api.post('/auth/login', { email, password });
+  localStorage.setItem('screenapp_token', data.token);
+  localStorage.setItem('screenapp_user', JSON.stringify(data.user));
+  return data.user;
+};
+
+export const registerUser = async (email, password, name) => {
+  const { data } = await api.post('/auth/register', { email, password, name });
+  localStorage.setItem('screenapp_token', data.token);
+  localStorage.setItem('screenapp_user', JSON.stringify(data.user));
+  return data.user;
+};
+
+export const logoutUser = () => {
+  localStorage.removeItem('screenapp_token');
+  localStorage.removeItem('screenapp_user');
+};
+
+export const getCurrentUser = () => {
+  try {
+    return JSON.parse(localStorage.getItem('screenapp_user'));
+  } catch {
+    return null;
+  }
+};
+
+export const getToken = () => localStorage.getItem('screenapp_token');
+
+// Attach auth header to all requests
+api.interceptors.request.use((config) => {
+  const token = getToken();
+  if (token) config.headers.Authorization = `Bearer ${token}`;
+  return config;
+});
+
 export const uploadRecording = async (blob, filename, duration, source) => {
   const formData = new FormData();
   formData.append('file', blob, filename);
@@ -75,4 +112,8 @@ export const deleteFolder = async (id) => {
 export const updateRecording = async (id, data) => {
   const response = await api.patch(`/recordings/${id}`, data);
   return response.data;
+};
+
+export const updateRecordingStatus = async (id, status) => {
+  return updateRecording(id, { status });
 };

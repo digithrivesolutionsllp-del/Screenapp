@@ -12,6 +12,7 @@ from app.routes.recordings import router as recordings_router
 from app.routes.folders import router as folders_router
 from app.routes.transcribe import router as transcribe_router
 from app.routes.ai import router as ai_router
+from app.routes.auth import router as auth_router
 
 
 # ---------------------------------------------------------------------------
@@ -64,6 +65,7 @@ app.include_router(recordings_router)
 app.include_router(folders_router)
 app.include_router(transcribe_router)
 app.include_router(ai_router)
+app.include_router(auth_router)
 
 
 # ---------------------------------------------------------------------------

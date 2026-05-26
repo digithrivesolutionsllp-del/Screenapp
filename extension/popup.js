@@ -1,474 +1,509 @@
-// ScreenApp Recorder - Popup UI v1.4
-// Uses chrome.scripting to inject tabCapture into each selected tab
+// ScreenApp Recorder - Popup UI v16.1
+// Fixes: (1) multiTabPanel→tabListPanel (2) picker cancel guard (3) stream cleanup (4) proper pending counter
+// IMPORTANT: Keep popup OPEN from Record to Stop. Closing mid-recording loses chunks.
 
-let tabs = [];
-let selectedTabIds = new Set();
-let tabIds = [];         // current recording tab IDs (for state restore)
-let isRecording = false;
-let recordingStartTime = null;
-let timerInterval = null;
-let activeTabStreams = []; // audio tracks from each captured tab
-let mediaRecorder = null;
-let audioChunks = [];
+console.log('[Popup] popup.js v16.1 loaded');
 
-// Elements
-const statusBadge = document.getElementById('statusBadge');
-const recordingBar = document.getElementById('recordingBar');
-const recTabCount = document.getElementById('recTabCount');
-const recTimer = document.getElementById('recTimer');
-const selectedChips = document.getElementById('selectedChips');
-const selectedCount = document.getElementById('selectedCount');
-const tabList = document.getElementById('tabList');
-const btnRecord = document.getElementById('btnRecord');
-const btnStop = document.getElementById('btnStop');
-const btnCancel = document.getElementById('btnCancel');
-const successPanel = document.getElementById('successPanel');
-const errorBanner = document.getElementById('errorBanner');
-const liveRecPanel = document.getElementById('liveRecPanel');
-const liveTabCount = document.getElementById('liveTabCount');
-const liveTimer = document.getElementById('liveTimer');
-const btnLiveStop = document.getElementById('btnLiveStop');
+const API_BASE = 'https://screenapp-production-e5c2.up.railway.app';
+var _successShown = false;
 
-// ─── Init ─────────────────────────────────────────────────────────────────────
+// ─── State ───────────────────────────────────────────────────────────────────
 
-function init() {
-  // Check if a recording is already in progress (popup reopened mid-recording)
-  chrome.runtime.sendMessage({ type: 'GET_RECORDING_STATE' }, (response) => {
-    if (response && response.state && response.state.status === 'recording') {
-      restoreRecordingState(response.state);
+// [{mediaRecorder, chunks, tabTitle, stream, tabId}]
+window._recorders = [];
+window._isRecording = false;
+window._recordingStartTime = null;
+window._activeStreams = [];
+window._tabList = [];  // [{label, tabId}] for display
+
+// ─── Init ───────────────────────────────────────────────────────────────────
+
+document.addEventListener('DOMContentLoaded', function() {
+  var btnRecord = document.getElementById('btnRecord');
+  if (!btnRecord) { console.error('[Popup] btnRecord NOT FOUND'); return; }
+
+  updateSteps(1);
+  console.log('[Popup] v16.1 init');
+
+  // Add Tab button in tab list panel (inline onclick in HTML handles it too)
+  var btnAddTabPanel = document.getElementById('btnAddTabPanel');
+  if (btnAddTabPanel) {
+    btnAddTabPanel.addEventListener('click', function() {
+      if (window._isRecording) startRecording();
+    });
+  }
+
+  btnRecord.addEventListener('click', function() {
+    if (window._isRecording) { stopRecording(); return; }
+    startRecording();
+  });
+
+  var btnStop = document.getElementById('btnStop');
+  var btnLiveStop = document.getElementById('btnLiveStop');
+  if (btnStop) btnStop.addEventListener('click', stopRecording);
+  if (btnLiveStop) btnLiveStop.addEventListener('click', stopRecording);
+
+  document.addEventListener('keydown', function(e) {
+    if (e.key === 'F9' && window._isRecording) { e.preventDefault(); stopRecording(); }
+  });
+
+  console.log('[Popup] v16.1 listeners attached');
+});
+
+// ─── Start Recording ─────────────────────────────────────────────────────────
+
+function startRecording() {
+  console.log('[Popup] startRecording(), tabs:', window._recorders.length);
+
+  // Use chrome.desktopCapture via background script — supports proper picker
+  chrome.runtime.sendMessage({ type: 'GET_MEDIA', constraints: { audio: true, video: false } }, function(response) {
+    if (response && response.streamId) {
+      // User picked a source — get the stream
+      navigator.mediaDevices.getUserMedia({
+        audio: { mandatory: { chromeMediaSource: 'desktop', chromeMediaSourceId: response.streamId } }
+      }).then(handleStream).catch(function(err) {
+        console.error('[Popup] getUserMedia from streamId failed:', err.name, err.message);
+        showError('Failed to capture audio. Please try again.');
+      });
+    } else if (response && response.cancelled) {
+      // User cancelled the picker — stop here, do NOT auto-open another picker
+      console.log('[Popup] Picker cancelled by user — recording not started');
     } else {
-      loadTabsWithTimeout();
+      // Background not available — use direct getDisplayMedia
+      fallbackGetDisplayMedia();
     }
   });
-}
 
-function restoreRecordingState(state) {
-  console.log('[Popup] Restoring recording state:', state);
-  isRecording = true;
-  recordingStartTime = state.startTime || Date.now();
-  selectedTabIds = new Set(state.tabIds || []);
-  tabIds = state.tabIds || [];
-
-  // Restore live recording UI immediately
-  statusBadge.className = 'status-badge status-recording';
-  statusBadge.textContent = 'REC';
-  recordingBar.classList.add('active');
-  liveRecPanel.classList.add('active');
-  recTabCount.textContent = state.tabCount || 1;
-  liveTabCount.textContent = state.tabCount || 1;
-
-  btnRecord.style.display = 'none';
-  btnStop.style.display = 'flex';
-  btnStop.disabled = false;
-  btnCancel.disabled = true;
-
-  // Start the timer
-  startTimer();
-
-  // Note: tab list still shows since we didn't load them yet
-  // loadTabsWithTimeout() will refresh the tab list
-  loadTabsWithTimeout();
-
-  console.log('[Popup] Recording state restored. Timer running, can stop from here.');
-}
-
-function loadTabsWithTimeout() {
-  tabList.innerHTML = '<div class="loading"><div class="spinner"></div>Fetching tabs...</div>';
-  const timeout = setTimeout(() => {
-    tabList.innerHTML = '<div style="padding:20px;color:#6b7280;font-size:12px;text-align:center">Tab list timed out.<br><span style="color:#94a3b8">Try reopening on a regular page.</span><br><button onclick="loadTabsWithTimeout()" style="margin-top:8px;padding:4px 12px;background:#1e293b;color:#94a3b8;border:none;border-radius:6px;cursor:pointer">Retry</button></div>';
-  }, 5000);
-
-  chrome.tabs.query({}, (allTabs) => {
-    clearTimeout(timeout);
-    if (chrome.runtime.lastError) {
-      tabList.innerHTML = '<div style="padding:20px;color:#6b7280;font-size:12px;text-align:center">Permission error.<br><span style="color:#94a3b8">' + chrome.runtime.lastError.message + '</span></div>';
-      return;
+  // Timeout: if background doesn't respond in 1.5s, use direct fallback
+  setTimeout(function() {
+    if (!window._isRecording && window._recorders.length === 0) {
+      console.log('[Popup] Background timeout, using direct getDisplayMedia');
+      fallbackGetDisplayMedia();
     }
-    tabs = allTabs.filter(t =>
-      t.url &&
-      !t.url.startsWith('chrome://') &&
-      !t.url.startsWith('chrome-extension://') &&
-      !t.url.startsWith('devtools://') &&
-      !t.url.startsWith('about:') &&
-      !t.url.startsWith('file://')
-    ).map(t => ({
-      id: t.id,
-      title: (t.title || 'Untitled').substring(0, 60),
-      url: t.url,
-      favIconUrl: t.favIconUrl,
-      active: t.active
-    }));
-    renderTabs();
-  });
+  }, 1500);
 }
 
-// ─── Render ───────────────────────────────────────────────────────────────────
+function fallbackGetDisplayMedia() {
+  console.log('[Popup] fallbackGetDisplayMedia()');
+  navigator.mediaDevices.getDisplayMedia({ audio: true, video: true })
+    .then(handleStream)
+    .catch(function(err) {
+      console.error('[Popup] getDisplayMedia error:', err.name, err.message);
+      if (err.name !== 'NotAllowedError' && err.name !== 'AbortError') {
+        showError('Error: ' + (err.message || err.name));
+      } else {
+        console.log('[Popup] Picker cancelled — no action taken');
+      }
+    });
+}
 
-function renderTabs() {
-  if (tabs.length === 0) {
-    tabList.innerHTML = '<div style="padding:20px;color:#6b7280;font-size:12px;text-align:center">No tabs found.<br><span style="color:#94a3b8">Open some tabs first, then reopen this popup.</span></div>';
+// ─── Handle Stream ────────────────────────────────────────────────────────────
+
+function handleStream(stream) {
+  console.log('[Popup] handleStream()');
+
+  // Stop any video tracks — audio only
+  stream.getVideoTracks().forEach(function(t) { t.stop(); stream.removeTrack(t); });
+
+  var audioTracks = stream.getAudioTracks();
+  if (audioTracks.length === 0) {
+    // Clean up the stream before returning
+    stream.getTracks().forEach(function(t) { t.stop(); });
+    showError('No audio captured. CHECK "Share tab audio" in the picker, then Share.');
     return;
   }
-  tabList.innerHTML = tabs.map(tab => {
-    const isSelected = selectedTabIds.has(tab.id);
-    const favicon = tab.favIconUrl || '';
-    return '<div class="tab-item' + (isSelected ? ' selected' : '') + '" data-tab-id="' + tab.id + '">' +
-      (isSelected ? '<div class="tab-check">&#10003;</div>' : '<div class="tab-empty-check"></div>') +
-      '<img class="tab-favicon" src="' + favicon + '" onerror="this.style.display=\'none\'" />' +
-      '<div class="tab-info">' +
-        '<div class="tab-title">' + escapeHtml(tab.title) + '</div>' +
-        '<div class="tab-url">' + escapeHtml(tab.url) + '</div>' +
-      '</div>' +
-    '</div>';
-  }).join('');
-  updateSelectedChips();
-  updateButtons();
+
+  var tabLabel = audioTracks[0].label.replace(/^Tab:\s*/i, '').trim() || 'Tab ' + (window._recorders.length + 1);
+  var tabId = 'tab-' + Date.now();
+  console.log('[Popup] Tab label:', tabLabel);
+
+  // First tab: initialise recording state
+  if (window._recorders.length === 0) {
+    _successShown = false;
+    window._recordingStartTime = Date.now();
+    window._isRecording = true;
+    window._tabList = [];
+
+    chrome.runtime.sendMessage({ type: 'SET_BADGE', text: 'REC' });
+
+    fetch(API_BASE + '/api/recordings/live-state', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        title: 'Tab Recording',
+        tab_count: '1',
+        start_time: String(window._recordingStartTime)
+      })
+    }).catch(function() {});
+  }
+
+  var mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+    ? 'audio/webm;codecs=opus'
+    : MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : '';
+
+  var chunks = [];
+  var mediaRecorder = new MediaRecorder(stream, mimeType ? { mimeType: mimeType } : {});
+
+  mediaRecorder.ondataavailable = function(e) {
+    if (e.data && e.data.size > 0) {
+      chunks.push(e.data);
+      if (chunks.length === 1) {
+        console.log('[Popup] FIRST CHUNK for', tabLabel, 'size:', e.data.size);
+      }
+    }
+  };
+
+  mediaRecorder.onerror = function(e) {
+    console.error('[Popup] MediaRecorder ERROR for', tabLabel, ':', e.error ? e.error.message : 'Unknown');
+    showError('Recording error for ' + tabLabel + ': ' + (e.error ? e.error.message : 'Unknown'));
+    removeTab(tabId);
+  };
+
+  mediaRecorder.onstop = function() {
+    var totalSize = chunks.reduce(function(s, c) { return s + (c.size || 0); }, 0);
+    console.log('[Popup] onstop for', tabLabel, '— chunks:', chunks.length, 'size:', totalSize);
+    if (chunks.length === 0 || totalSize < 5000) {
+      showError('No audio captured for ' + tabLabel + '. Did you CHECK "Share tab audio"?');
+      onTabStopped(tabId);
+      return;
+    }
+    directUpload(chunks, tabLabel, function() { onTabStopped(tabId); });
+  };
+
+  mediaRecorder.start(500);
+  console.log('[Popup] MediaRecorder started for', tabLabel, 'state:', mediaRecorder.state);
+
+  window._recorders.push({ mediaRecorder: mediaRecorder, chunks: chunks, tabTitle: tabLabel, stream: stream, tabId: tabId });
+  window._activeStreams.push(stream);
+  window._tabList.push({ label: tabLabel, tabId: tabId });
+
+  fetch(API_BASE + '/api/recordings/live-state', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      title: window._recorders.length + ' tab(s)',
+      tab_count: String(window._recorders.length),
+      start_time: String(window._recordingStartTime)
+    })
+  }).catch(function() {});
+
+  updateRecordingUI();
+  startTimer();
+  console.log('[Popup] Total tabs recording:', window._recorders.length);
 }
 
-function selectTab(tabId) {
-  if (isRecording) return;
-  if (selectedTabIds.has(tabId)) selectedTabIds.delete(tabId);
-  else selectedTabIds.add(tabId);
-  renderTabs();
-  updateButtons();
-}
+// ─── Remove a single tab from recording ─────────────────────────────────────
 
 function removeTab(tabId) {
-  if (isRecording) return;
-  selectedTabIds.delete(tabId);
-  renderTabs();
-  updateButtons();
-}
-
-function clearSelection() {
-  if (isRecording) return;
-  selectedTabIds.clear();
-  renderTabs();
-  updateButtons();
-}
-
-function updateSelectedChips() {
-  selectedCount.textContent = selectedTabIds.size;
-  if (selectedTabIds.size === 0) {
-    selectedChips.innerHTML = '<span class="chip-empty">Click on a tab below to select it</span>';
-  } else {
-    selectedChips.innerHTML = Array.from(selectedTabIds).map(id => {
-      const tab = tabs.find(t => t.id === id);
-      const name = tab ? tab.title.substring(0, 20) : 'Tab ' + id;
-      return '<div class="chip"><span class="chip-name">' + escapeHtml(name) + '</span><span class="chip-remove" data-remove-id="' + id + '">&times;</span></div>';
-    }).join('');
+  var rec = window._recorders.find(function(r) { return r.tabId === tabId; });
+  if (rec) {
+    try { rec.stream.getTracks().forEach(function(t) { t.stop(); }); } catch(e) {}
+    window._activeStreams = window._activeStreams.filter(function(s) { return s !== rec.stream; });
+    window._tabList = window._tabList.filter(function(t) { return t.tabId !== tabId; });
+    window._recorders = window._recorders.filter(function(r) { return r.tabId !== tabId; });
   }
-}
-
-function updateButtons() {
-  btnRecord.disabled = selectedTabIds.size === 0 || isRecording;
-}
-
-// ─── Recording ────────────────────────────────────────────────────────────────
-
-async function startRecording() {
-  console.log('[Popup] startRecording() called, selected tabs:', selectedTabIds.size);
-  if (selectedTabIds.size === 0) return;
-
-  const tabIds = Array.from(selectedTabIds);
-  console.log('[Popup] tabIds:', tabIds);
-  btnRecord.disabled = true;
-  btnCancel.disabled = true;
-  isRecording = true;
-  recordingStartTime = Date.now();
-  audioChunks = [];
-  activeTabStreams = [];
-
-  // Immediate UI
-  statusBadge.className = 'status-badge status-recording';
-  statusBadge.textContent = 'Starting...';
-  recordingBar.classList.add('active');
-  liveRecPanel.classList.add('active');
-  recTabCount.textContent = tabIds.length;
-  liveTabCount.textContent = tabIds.length;
-  btnRecord.style.display = 'none';
-  btnStop.style.display = 'flex';
-  btnStop.disabled = false;
-  btnStop.textContent = '⏹ Stop';
-
-  try {
-    // Build combined stream from all selected tabs
-    const combinedStream = new MediaStream();
-    let successCount = 0;
-
-    for (const tabId of tabIds) {
-      try {
-        // Inject tabCapture script into each selected tab
-        await chrome.scripting.executeScript({
-          target: { tabId: tabId },
-          func: () => {
-            window.__tabCaptureStarted = false;
-            navigator.mediaDevices.getUserMedia({ audio: true, video: false })
-              .then(stream => {
-                window.__tabCaptureStream = stream;
-                window.__tabCaptureStarted = true;
-                // Notify popup that this tab is ready
-                chrome.runtime.sendMessage({
-                  type: 'TAB_CAPTURE_READY',
-                  tabId: null // we'll use tabId from closure
-                });
-              })
-              .catch(err => {
-                console.warn('[Tab] getUserMedia failed:', err.message);
-                chrome.runtime.sendMessage({ type: 'TAB_CAPTURE_ERROR', error: err.message });
-              });
-          }
-        });
-
-        // Wait a moment for the stream to be established
-        await new Promise(r => setTimeout(r, 500));
-
-        // Try to get the stream from the tab via executeScript result
-        // Since we can't return streams from executeScript, we'll use a shared approach:
-        // Call chrome.tabCapture.capture from this popup context for ONE tab at a time
-        break; // fallback: just do one tab for now
-
-      } catch (err) {
-        console.warn('[Popup] Script injection error for tab', tabId, ':', err.message);
-      }
-    }
-
-    // Use chrome.tabCapture from popup (valid in user gesture context)
-    for (const tabId of tabIds) {
-      try {
-        console.log('[Popup] Attempting tabCapture for tab:', tabId);
-        const stream = await chrome.tabCapture.capture({ audio: true, video: false });
-        if (stream && stream.getAudioTracks().length > 0) {
-          stream.getAudioTracks().forEach(track => combinedStream.addTrack(track));
-          activeTabStreams.push(stream);
-          successCount++;
-          console.log('[Popup] tabCapture SUCCESS for tab', tabId, '- tracks:', stream.getAudioTracks().length);
-        } else {
-          console.warn('[Popup] tabCapture returned empty stream for tab', tabId);
-          if (stream) stream.getTracks().forEach(t => t.stop());
-        }
-      } catch (err) {
-        console.error('[Popup] tabCapture error for tab', tabId, ':', err.message);
-      }
-    }
-
-    if (combinedStream.getAudioTracks().length === 0) {
-      showError('Could not capture audio. Try selecting a different tab and make sure audio is playing.');
-      resetUI();
-      return;
-    }
-
-    // Start MediaRecorder
-    const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
-      ? 'audio/webm;codecs=opus'
-      : MediaRecorder.isTypeSupported('audio/webm')
-      ? 'audio/webm'
-      : '';
-
-    mediaRecorder = new MediaRecorder(combinedStream, mimeType ? { mimeType } : {});
-
-    mediaRecorder.ondataavailable = (e) => {
-      if (e.data && e.data.size > 0) {
-        audioChunks.push(e.data);
-        console.log('[Popup] Chunk', audioChunks.length, '- size:', (e.data.size / 1024).toFixed(1), 'KB');
-      }
-    };
-
-    mediaRecorder.onerror = (e) => {
-      console.error('[Popup] Recorder error:', e.error);
-      showError('Recording error: ' + (e.error?.message || 'Unknown'));
-      resetUI();
-    };
-
-    mediaRecorder.start(500);
-    statusBadge.textContent = 'REC';
-    startTimer();
-    // Tell background we're recording so popup can restore state on reopen
-    chrome.runtime.sendMessage({
-      type: 'RECORDING_STARTED',
-      startTime: recordingStartTime,
-      tabIds: tabIds,
-      tabCount: tabIds.length
-    });
-    console.log('[Popup] Recording started, tracks:', combinedStream.getAudioTracks().length);
-
-  } catch (err) {
-    console.error('[Popup] startRecording error:', err);
-    showError('Failed: ' + err.message);
-    chrome.runtime.sendMessage({ type: 'RECORDING_STOPPED' });
+  if (window._recorders.length === 0) {
+    _successShown = true;
     resetUI();
+  } else {
+    updateRecordingUI();
+    fetch(API_BASE + '/api/recordings/live-state', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        title: window._recorders.length + ' tab(s)',
+        tab_count: String(window._recorders.length),
+        start_time: String(window._recordingStartTime)
+      })
+    }).catch(function() {});
   }
 }
 
-async function stopRecording() {
-  if (!isRecording) return;
+// ─── Stop a single tab ──────────────────────────────────────────────────────
 
-  btnStop.disabled = true;
-  btnStop.textContent = 'Saving...';
-  statusBadge.textContent = 'Saving';
+window.stopTab = function(tabId) {
+  console.log('[Popup] stopTab()', tabId);
+  var rec = window._recorders.find(function(r) { return r.tabId === tabId; });
+  if (rec && rec.mediaRecorder.state !== 'inactive') {
+    rec.mediaRecorder.stop();
+  }
+};
+
+// ─── Called when all tab recorders finish ─────────────────────────────────────
+
+function onTabStopped(triggerTabId) {
+  var allInactive = window._recorders.every(function(rec) {
+    return !rec.mediaRecorder || rec.mediaRecorder.state === 'inactive';
+  });
+  if (!allInactive) return;
+  if (_successShown) return;
+  _successShown = true;
+
+  var statusBadge = document.getElementById('statusBadge');
+  var recordingBar = document.getElementById('recordingBar');
+  var liveRecPanel = document.getElementById('liveRecPanel');
+  var successPanel = document.getElementById('successPanel');
+  var btnStop = document.getElementById('btnStop');
+  var btnRecordEl = document.getElementById('btnRecord');
+
+  if (statusBadge) { statusBadge.className = 'status-badge status-saved'; statusBadge.textContent = 'Saved'; }
+  if (recordingBar) recordingBar.classList.remove('active');
+  if (liveRecPanel) liveRecPanel.classList.remove('active');
+  if (successPanel) successPanel.classList.add('active');
+  if (btnStop) btnStop.style.display = 'none';
+  if (btnRecordEl) { btnRecordEl.style.display = 'flex'; btnRecordEl.disabled = false; btnRecordEl.textContent = 'Record Tab Audio'; }
+
+  window._isRecording = false;
+  window._recordingStartTime = null;
   stopTimer();
 
-  // Tell background recording has stopped
-  chrome.runtime.sendMessage({ type: 'RECORDING_STOPPED' });
+  chrome.runtime.sendMessage({ type: 'CLEAR_BADGE' });
+  fetch(API_BASE + '/api/recordings/live-state', { method: 'DELETE' }).catch(function() {});
 
-  // Stop all tab streams
-  for (const stream of activeTabStreams) {
-    stream.getTracks().forEach(track => track.stop());
-  }
-  activeTabStreams = [];
-
-  // Stop recorder
-  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
-    mediaRecorder.stop();
-  }
-  mediaRecorder = null;
-
-  await new Promise(r => setTimeout(r, 500));
-
-  if (audioChunks.length === 0) {
-    showError('No audio recorded. Try again.');
-    resetUI();
-    return;
-  }
-
-  // Combine chunks
-  const allBlobs = audioChunks;
-  audioChunks = [];
-  const totalSize = allBlobs.reduce((s, b) => s + b.size, 0);
-  const combined = new Uint8Array(totalSize);
-  let offset = 0;
-  for (const blob of allBlobs) {
-    const arr = new Uint8Array(await blob.arrayBuffer());
-    combined.set(arr, offset);
-    offset += arr.byteLength;
-  }
-
-  const finalBlob = new Blob([combined], { type: 'audio/webm' });
-  console.log('[Popup] Final blob:', (finalBlob.size / 1024).toFixed(1), 'KB, chunks:', allBlobs.length);
-
-  // Convert to base64 data URL for background to upload
-  const reader = new FileReader();
-  reader.onloadend = () => {
-    const dataUrl = reader.result;
-    const now = new Date();
-    const timeStr = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    const dateStr = now.toLocaleDateString([], { month: 'short', day: 'numeric' });
-    const title = `Tab Recording · ${dateStr} ${timeStr}`;
-
-    chrome.runtime.sendMessage({
-      type: 'FINALIZE_RECORDING',
-      blob: dataUrl,
-      title: title,
-    }, (response) => {
-      if (response && response.success) {
-        showSuccess(title, selectedTabIds.size);
-      } else {
-        showError(response?.error || 'Upload failed');
-        resetUI();
-      }
-    });
-  };
-  reader.readAsDataURL(finalBlob);
+  console.log('[Popup] All recordings saved!');
+  setTimeout(resetUI, 8000);
 }
 
-// ─── UI Helpers ───────────────────────────────────────────────────────────────
+// ─── UI: Update recording state ──────────────────────────────────────────────
+
+function updateRecordingUI() {
+  var tabCount = window._recorders.length;
+  var statusBadge = document.getElementById('statusBadge');
+  var recordingBar = document.getElementById('recordingBar');
+  var liveRecPanel = document.getElementById('liveRecPanel');
+  var instructions = document.getElementById('instructionsPanel');
+  var btnStop = document.getElementById('btnStop');
+  var btnRecordEl = document.getElementById('btnRecord');
+  var tabListPanel = document.getElementById('tabListPanel');
+  var tabList = document.getElementById('tabList');
+  var btnAddTabPanel = document.getElementById('btnAddTabPanel');
+
+  var badgeText = tabCount === 0 ? 'Idle' : (tabCount === 1 ? 'REC' : 'REC x' + tabCount);
+  var btnText = tabCount === 0 ? 'Record Tab Audio' : 'Stop All';
+
+  if (statusBadge) {
+    statusBadge.textContent = badgeText;
+    statusBadge.className = 'status-badge ' + (tabCount === 0 ? 'status-idle' : 'status-recording');
+  }
+
+  if (tabCount > 0) {
+    if (recordingBar) recordingBar.classList.add('active');
+    if (liveRecPanel) liveRecPanel.classList.add('active');
+    if (instructions) instructions.style.display = 'none';
+    if (btnStop) { btnStop.style.display = 'flex'; btnStop.disabled = false; }
+    if (btnRecordEl) { btnRecordEl.style.display = 'flex'; btnRecordEl.disabled = false; btnRecordEl.textContent = btnText; }
+
+    // Show tab list panel with all recorded tabs
+    if (tabListPanel) { tabListPanel.classList.add('active'); }
+    if (tabList) {
+      var html = '';
+      window._tabList.forEach(function(t) {
+        html += '<div class="tab-item">' +
+          '<span class="tab-dot"></span>' +
+          '<span class="tab-label">' + escHtml(t.label) + '</span>' +
+          '<button class="btn-remove-tab" onclick="stopTab(\'' + t.tabId + '\')">&#10005;</button>' +
+          '</div>';
+      });
+      tabList.innerHTML = html;
+    }
+
+    updateSteps(4);
+  } else {
+    if (tabListPanel) tabListPanel.classList.remove('active');
+  }
+}
+
+function escHtml(str) {
+  return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+// ─── Timer ───────────────────────────────────────────────────────────────────
+
+var _timerInterval = null;
 
 function startTimer() {
-  timerInterval = setInterval(() => {
-    const elapsed = Math.floor((Date.now() - recordingStartTime) / 1000);
-    const mins = String(Math.floor(elapsed / 60)).padStart(2, '0');
-    const secs = String(elapsed % 60).padStart(2, '0');
-    const time = mins + ':' + secs;
-    recTimer.textContent = time;
-    if (liveTimer) liveTimer.textContent = time;
+  stopTimer();
+  _timerInterval = setInterval(function() {
+    if (!window._recordingStartTime) return;
+    var elapsed = Math.floor((Date.now() - window._recordingStartTime) / 1000);
+    var m = String(Math.floor(elapsed / 60)).padStart(2, '0');
+    var s = String(elapsed % 60).padStart(2, '0');
+    var recTimer = document.getElementById('recTimer');
+    var liveTimer = document.getElementById('liveTimer');
+    if (recTimer) recTimer.textContent = m + ':' + s;
+    if (liveTimer) liveTimer.textContent = m + ':' + s;
   }, 1000);
 }
 
 function stopTimer() {
-  if (timerInterval) { clearInterval(timerInterval); timerInterval = null; }
+  if (_timerInterval) { clearInterval(_timerInterval); _timerInterval = null; }
 }
+
+// ─── Stop Recording (all tabs) ──────────────────────────────────────────────
+
+function stopRecording() {
+  console.log('[Popup] stopRecording() — tabs:', window._recorders.length);
+  stopTimer();
+  _successShown = true;
+
+  var btnStop = document.getElementById('btnStop');
+  var statusBadge = document.getElementById('statusBadge');
+  var btnRecordEl = document.getElementById('btnRecord');
+  if (btnStop) { btnStop.disabled = true; btnStop.textContent = 'Processing...'; }
+  if (statusBadge) { statusBadge.textContent = 'Processing'; statusBadge.className = 'status-badge status-saving'; }
+  if (btnRecordEl) { btnRecordEl.style.display = 'none'; btnRecordEl.disabled = true; }
+
+  // Stop all stream tracks immediately
+  window._activeStreams.forEach(function(s) {
+    s.getTracks().forEach(function(t) { try { t.stop(); } catch(e) {} });
+  });
+  window._activeStreams = [];
+
+  if (window._recorders.length === 0) { resetUI(); return; }
+
+  chrome.runtime.sendMessage({ type: 'CLEAR_BADGE' });
+
+  // Stop all MediaRecorders — track pending count properly
+  var pending = window._recorders.length;
+  var checkDone = function() {
+    pending--;
+    if (pending <= 0) {
+      // Wait a moment for onstop handlers to finish before showing success
+      setTimeout(function() { onTabStopped(null); }, 500);
+    }
+  };
+
+  window._recorders.forEach(function(rec) {
+    if (rec.mediaRecorder.state !== 'inactive') {
+      rec.mediaRecorder.onstop = function() {
+        var totalSize = rec.chunks.reduce(function(s, c) { return s + (c.size || 0); }, 0);
+        if (rec.chunks.length === 0 || totalSize < 5000) {
+          showError('No audio for ' + rec.tabTitle + '.');
+          checkDone();
+          return;
+        }
+        directUpload(rec.chunks, rec.tabTitle, checkDone);
+      };
+      rec.mediaRecorder.stop();
+    } else {
+      var totalSize = (rec.chunks || []).reduce(function(s, c) { return s + (c.size || 0); }, 0);
+      if ((rec.chunks || []).length > 0 && totalSize >= 5000) {
+        directUpload(rec.chunks, rec.tabTitle, checkDone);
+      } else {
+        checkDone();
+      }
+    }
+  });
+}
+
+// ─── Direct Upload ───────────────────────────────────────────────────────────
+
+function directUpload(chunks, tabTitle, callback) {
+  console.log('[Popup] directUpload() — chunks:', chunks.length, 'tab:', tabTitle);
+
+  async function doUpload() {
+    try {
+      var totalSize = 0;
+      for (var k = 0; k < chunks.length; k++) totalSize += chunks[k].size;
+      console.log('[Popup] Total size:', totalSize, 'bytes');
+
+      if (totalSize < 5000) {
+        showError('Recording too short for ' + tabTitle + ' (' + totalSize + ' bytes).');
+        if (callback) callback();
+        return;
+      }
+
+      var combined = new Uint8Array(totalSize);
+      var offset = 0;
+      for (var m = 0; m < chunks.length; m++) {
+        var ab = await chunks[m].arrayBuffer();
+        combined.set(new Uint8Array(ab), offset);
+        offset += ab.byteLength;
+      }
+
+      var blob = new Blob([combined.slice(0, offset)], { type: 'audio/webm' });
+      console.log('[Popup] Blob ready, size:', blob.size, 'bytes');
+
+      var duration = window._recordingStartTime ? Math.floor((Date.now() - window._recordingStartTime) / 1000) : 0;
+      var formData = new FormData();
+      formData.append('title', tabTitle || 'Tab Recording');
+      formData.append('file', blob, 'recording.webm');
+      formData.append('duration', String(duration));
+
+      var response = await fetch(API_BASE + '/api/recordings/upload', { method: 'POST', body: formData });
+
+      if (response.ok) {
+        var result = await response.json();
+        console.log('[Popup] Uploaded, ID:', result.id, 'title:', tabTitle);
+      } else {
+        var text = await response.text();
+        console.error('[Popup] Upload failed:', response.status, text);
+        showError('Upload failed for ' + tabTitle + ' (' + response.status + ')');
+      }
+    } catch(err) {
+      console.error('[Popup] Upload error:', err.name, err.message);
+      showError('Upload error: ' + (err.name || err.message));
+    }
+    if (callback) callback();
+  }
+
+  doUpload();
+}
+
+// ─── UI Helpers ─────────────────────────────────────────────────────────────
 
 function showError(msg) {
-  errorBanner.textContent = '⚠ ' + msg;
-  errorBanner.className = 'error-banner active';
-  setTimeout(() => { errorBanner.className = 'error-banner'; }, 7000);
-}
-
-function showSuccess(title, tabCount) {
-  statusBadge.className = 'status-badge status-saved';
-  statusBadge.textContent = 'Saved';
-  recordingBar.classList.remove('active');
-  successPanel.classList.add('active');
-  btnStop.style.display = 'none';
-  btnCancel.style.display = 'none';
-  btnRecord.style.display = 'none';
-  setTimeout(resetUI, 3000);
+  console.error('[Popup] showError:', msg);
+  var banner = document.getElementById('errorBanner');
+  if (banner) { banner.textContent = msg; banner.className = 'error-banner active'; }
+  setTimeout(function() {
+    var b = document.getElementById('errorBanner');
+    if (b) b.className = 'error-banner';
+  }, 5000);
 }
 
 function resetUI() {
-  isRecording = false;
-  selectedTabIds.clear();
+  console.log('[Popup] resetUI()');
+  _successShown = false;
+  window._isRecording = false;
+  window._recordingStartTime = null;
+  window._recorders = [];
+  window._activeStreams = [];
+  window._tabList = [];
   stopTimer();
-  statusBadge.className = 'status-badge status-idle';
-  statusBadge.textContent = 'Idle';
-  recordingBar.classList.remove('active');
-  successPanel.classList.remove('active');
-  liveRecPanel.classList.remove('active');
-  errorBanner.className = 'error-banner';
-  btnRecord.style.display = 'flex';
-  btnRecord.disabled = true;
-  btnStop.style.display = 'none';
-  btnCancel.style.display = 'flex';
-  btnCancel.disabled = false;
-  btnCancel.textContent = 'Clear';
-  recTimer.textContent = '00:00';
-  updateSelectedChips();
-  updateButtons();
-  loadTabsWithTimeout();
+
+  var statusBadge = document.getElementById('statusBadge');
+  var recordingBar = document.getElementById('recordingBar');
+  var liveRecPanel = document.getElementById('liveRecPanel');
+  var instructions = document.getElementById('instructionsPanel');
+  var btnRecordEl = document.getElementById('btnRecord');
+  var btnStop = document.getElementById('btnStop');
+  var successPanel = document.getElementById('successPanel');
+  var errorBanner = document.getElementById('errorBanner');
+  var recTimer = document.getElementById('recTimer');
+  var liveTimer = document.getElementById('liveTimer');
+  var tabListPanel = document.getElementById('tabListPanel');
+
+  if (statusBadge) { statusBadge.className = 'status-badge status-idle'; statusBadge.textContent = 'Idle'; }
+  if (recordingBar) recordingBar.classList.remove('active');
+  if (liveRecPanel) liveRecPanel.classList.remove('active');
+  if (instructions) instructions.style.display = 'block';
+  if (btnRecordEl) { btnRecordEl.style.display = 'flex'; btnRecordEl.disabled = false; btnRecordEl.textContent = 'Record Tab Audio'; }
+  if (btnStop) { btnStop.style.display = 'none'; btnStop.disabled = false; btnStop.textContent = 'Stop All'; }
+  if (successPanel) successPanel.classList.remove('active');
+  if (errorBanner) errorBanner.className = 'error-banner';
+  if (recTimer) recTimer.textContent = '00:00';
+  if (liveTimer) liveTimer.textContent = '00:00';
+  if (tabListPanel) tabListPanel.classList.remove('active');
+  updateSteps(1);
 }
 
-function escapeHtml(str) {
-  const div = document.createElement('div');
-  div.textContent = str;
-  return div.innerHTML;
+function updateSteps(currentStep) {
+  for (var i = 1; i <= 4; i++) {
+    var el = document.getElementById('step' + i);
+    if (!el) continue;
+    el.classList.remove('active', 'done');
+    if (i < currentStep) el.classList.add('done');
+    else if (i === currentStep) el.classList.add('active');
+  }
 }
-
-// ─── Event Listeners ─────────────────────────────────────────────────────────
-
-tabList.addEventListener('click', (e) => {
-  const item = e.target.closest('.tab-item');
-  if (!item || isRecording) return;
-  const tabId = parseInt(item.getAttribute('data-tab-id'), 10);
-  if (!isNaN(tabId)) selectTab(tabId);
-});
-
-selectedChips.addEventListener('click', (e) => {
-  const btn = e.target.closest('[data-remove-id]');
-  if (!btn || isRecording) return;
-  const tabId = parseInt(btn.getAttribute('data-remove-id'), 10);
-  if (!isNaN(tabId)) removeTab(tabId);
-});
-
-btnCancel?.addEventListener('click', clearSelection);
-btnRecord?.addEventListener('click', () => startRecording());
-btnStop?.addEventListener('click', () => stopRecording());
-btnLiveStop?.addEventListener('click', () => stopRecording());
-
-// Listen for recording complete from background
-chrome.runtime.onMessage.addListener((msg) => {
-  if (msg.type === 'RECORDING_COMPLETE') {
-    console.log('[Popup] Recording complete:', msg.recordingId);
-    showSuccess(msg.title || 'Recording saved', msg.tabCount || 1);
-  }
-  if (msg.type === 'UPLOAD_FAILED') {
-    console.error('[Popup] Upload failed:', msg.error);
-    showError('Upload failed: ' + msg.error);
-    resetUI();
-  }
-});
-
-console.log('[Popup] v1.4 loaded. btnRecord:', !!btnRecord);
-
-// ─── Start ─────────────────────────────────────────────────────────────────
-
-init();
